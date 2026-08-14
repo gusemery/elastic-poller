@@ -1,0 +1,51 @@
+mappings:
+  event_ci: ["$._source.kibana.alerting.instance_id", "$._source.rule.name", "$._source.rule.category", "$._source.host.hostname" ]
+  event_object: ["$._source.rule.name", "$._source.rule.category", "$._source.agent.type"]
+  event_source: ["$.unknown"]
+  event_source_id: ["$._id"]
+  event_name: ["$._source.kibana.alert.rule.rule_type_id", "$._source.log.file.path"]
+  event_description: ["$._source.message"]
+  event_severity: ["$._source.event.kind", "$._source.event.outcome", "$._source.input.type"]
+  event_time: ["$._source.@timestamp"]
+  # The following fields are not mandatory, so do not require a list of
+  # jsonpath mappings
+  event_domain: # Only for use in tenant-federated environments
+  event_id: ["$._source.kibana.alert.uuid"]
+  event_details:
+  event_ci_link:
+  event_name_link:
+  event_source_id: #["$.eventId"]
+  event_source_id_link: #["$.eventDetailsUrl"]
+transforms:
+  event_severity:
+    critical: ["alert", "critical", "CRITICAL", 5]
+    major: ["maj", "major", "ERROR", 4]
+    minor: ["filestream", "minor","OPEN", 3]
+    warning: ["wrn", "warning", 2]
+    indeterminate: ["sdt", "maintenance", 1, "False"]
+    clear: ["success", "clear", "CLOSED", 0, 255]
+timestamps:
+  type: "unix" # "unix" for unix timestamp, "datetime" for datetime string
+  # The other options are only used if the #type is "datetime"
+  day_first: false
+  year_first: false # Use if year is given in 2 digit format
+  offset: # Use if timestamps contains offset data in letter format e.g. BST, PDT
+  # Format of data should be in a dict, with key: pairs of timezone name: offset from UTC in seconds e.g.
+  # {BST: 60, PST: -28800}
+  # (BST being British Summer Time UTC+1, PST being Pacific Standard Time UTC-8)
+defaults:
+  event_ci: "defaultEventCI"
+  event_object: "defaultEventObject"
+  event_source: "ElasticSearch"
+  event_name: "defaultEventName"
+  event_description: "Default event description"
+  event_severity: 1
+  event_domain: # Only for use in tenant-federated environments
+  # The following fields are not mandatory, so do not require defaults. Any
+  # defaults specified for these fields must still be of the correct type
+  # (e.g. links must be URLs)
+  event_details: 
+  event_ci_link:
+  event_name_link: 
+  event_source_id: default
+  event_source_id_link: http://nothing.com
