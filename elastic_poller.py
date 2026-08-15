@@ -37,6 +37,13 @@ ELASTIC_TOKEN = os.getenv("ELASTIC_TOKEN")
 ELASTIC_URL = os.getenv("ELASTIC_URL")
 ELASTIC_BATCH_SIZE = int(os.getenv("ELASTIC_BATCH_SIZE", 500))
 ELASTIC_INDEX = os.getenv("ELASTIC_INDEXS")
+ELASTIC_QUERY = os.getenv("ELASTIC_QUERY", "*")
+ELASTIC_VERIFY_SSL = os.getenv("ELASTIC_VERIFY_SSL", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Edwin (Dexda) configuration
 PAUSE_INTERVAL = os.getenv("POLLER_INTERVAL", 240)
@@ -84,8 +91,8 @@ def build_logs_query(
     """Build an Elasticsearch _search body.
 
     Uses an exclusive millisecond lower bound (gt) so the last processed event
-    is never re-fetched. The _id sort tie-breaker keeps pagination stable when
-    multiple documents share the same @timestamp.
+    is never re-fetched. _shard_doc is used as the sort tie-breaker because ES 8+
+    disallows sorting on _id without enabling fielddata.
     """
     query: Dict[str, Any] = {
         "size": size,
@@ -109,7 +116,7 @@ def build_logs_query(
         },
         "sort": [
             {timestamp_field: {"order": "asc"}},
-            {"_id": {"order": "asc"}},
+            {"_shard_doc": "asc"},
         ],
     }
     if search_after is not None:
@@ -174,7 +181,7 @@ def fetch_elasticsearch_hits(
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Fetch one page of hits from Elasticsearch."""
     query_body = build_logs_query(
-        text="*",
+        text=ELASTIC_QUERY,
         bookmark_ms=bookmark_ms,
         size=ELASTIC_BATCH_SIZE,
         search_after=search_after,
@@ -185,7 +192,7 @@ def fetch_elasticsearch_hits(
         username=ELASTIC_USER,
         password=ELASTIC_PASS,
         api_key=ELASTIC_TOKEN,
-        verify_ssl=False,
+        verify_ssl=ELASTIC_VERIFY_SSL,
         timeout=60,
     )
     print("took: " + str(result["took"]))
@@ -285,6 +292,13 @@ def process_hits(
         event.set_enrichment_value("lm_loaded", bookmark_loaded)
         event.set_enrichment_value("lm_elastic_index", ELASTIC_INDEX)
 
+        try:
+            space_ids = hit["_source"].get("kibana", {}).get("space_ids", [])
+            if space_ids:
+                event.set_enrichment_value("lm_service_id", ",".join(space_ids))
+        except (TypeError, AttributeError):
+            pass
+
         cef = event.get_cef()
         # Ensure event_source_id is always the stable ES document _id
         cef["cef"]["event_source_id"] = cef["cef"]["source_record"]["_id"]
@@ -352,7 +366,7 @@ def poll_cycle(bookmark: int, watermark: int, bookmark_loaded: bool) -> int:
         last_hit = hits[-1]
         search_after = last_hit.get("sort")
         if search_after is None:
-            search_after = [hit_timestamp_ms(last_hit), last_hit["_id"]]
+            search_after = [hit_timestamp_ms(last_hit), last_hit["_shard_doc"]]
 
     return updated_bookmark
 

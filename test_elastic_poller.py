@@ -52,7 +52,7 @@ SAMPLE_HIT = {
         },
         "message": 'rule execution start: "c7707340-424b-11ee-ae1d-b3a96bbcb023"',
     },
-    "sort": [1786641258365, "43365083-0423-40ea-b045-7362858aad31"],
+    "sort": [1786641258365, 0],
 }
 
 
@@ -66,11 +66,11 @@ class BuildLogsQueryTests(unittest.TestCase):
         self.assertEqual(range_filter["format"], "epoch_millis")
         self.assertNotIn("gte", range_filter)
 
-    def test_sort_includes_timestamp_and_id_tiebreaker(self):
+    def test_sort_includes_timestamp_and_shard_doc_tiebreaker(self):
         query = elastic_poller.build_logs_query(text="*", bookmark_ms=0, size=500)
         self.assertEqual(
             query["sort"],
-            [{"@timestamp": {"order": "asc"}}, {"_id": {"order": "asc"}}],
+            [{"@timestamp": {"order": "asc"}}, {"_shard_doc": "asc"}],
         )
 
     def test_search_after_included_when_provided(self):
@@ -90,6 +90,17 @@ class BuildLogsQueryTests(unittest.TestCase):
         self.assertNotEqual(
             query_a["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gt"],
             query_b["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gt"],
+        )
+
+    def test_custom_query_string_is_passed_through(self):
+        query = elastic_poller.build_logs_query(
+            text="NOT event.action:execute-start",
+            bookmark_ms=0,
+            size=500,
+        )
+        self.assertEqual(
+            query["query"]["bool"]["must"][0]["query_string"]["query"],
+            "NOT event.action:execute-start",
         )
 
 
@@ -164,8 +175,8 @@ class PollCycleTests(unittest.TestCase):
         page_size = 2
         elastic_poller.ELASTIC_BATCH_SIZE = page_size
         hit_a = dict(SAMPLE_HIT)
-        hit_b = dict(SAMPLE_HIT, _id="bbbb", sort=[1786641258365, "bbbb"])
-        hit_c = dict(SAMPLE_HIT, _id="cccc", sort=[1786641259000, "cccc"])
+        hit_b = dict(SAMPLE_HIT, _id="bbbb", sort=[1786641258365, 1])
+        hit_c = dict(SAMPLE_HIT, _id="cccc", sort=[1786641259000, 2])
         hit_c["_source"] = dict(SAMPLE_HIT["_source"])
         hit_c["_source"]["@timestamp"] = "2026-08-13T17:14:19.000Z"
 
@@ -176,7 +187,7 @@ class PollCycleTests(unittest.TestCase):
 
         result = elastic_poller.poll_cycle(1786641258000, 1786641258000, True)
         self.assertEqual(mock_fetch.call_count, 2)
-        self.assertEqual(mock_fetch.call_args_list[1].kwargs["search_after"], [1786641258365, "bbbb"])
+        self.assertEqual(mock_fetch.call_args_list[1].kwargs["search_after"], [1786641258365, 1])
         self.assertEqual(result, 1786641259000)
 
 
@@ -221,6 +232,14 @@ class EventMappingTests(unittest.TestCase):
             )
             ids.append(event.get_cef()["cef"]["event_id"])
         self.assertEqual(len(set(ids)), 1)
+
+
+class ProcessHitsTests(unittest.TestCase):
+    def test_lm_service_id_enrichment_from_space_ids(self):
+        event_list, _ = elastic_poller.process_hits(
+            [SAMPLE_HIT], query_bookmark=0, watermark=0, bookmark_loaded=False
+        )
+        self.assertEqual(event_list[0]["enrichments"]["lm_service_id"], "cnrwm")
 
 
 if __name__ == "__main__":
