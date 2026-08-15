@@ -38,7 +38,7 @@ ELASTIC_URL = os.getenv("ELASTIC_URL")
 ELASTIC_BATCH_SIZE = int(os.getenv("ELASTIC_BATCH_SIZE", 500))
 ELASTIC_INDEX = os.getenv("ELASTIC_INDEXS")
 ELASTIC_QUERY = os.getenv("ELASTIC_QUERY", "*")
-ELASTIC_VERIFY_SSL = os.getenv("ELASTIC_VERIFY_SSL", "true").lower() in (
+ELASTIC_VERIFY_SSL = os.getenv("ELASTIC_VERIFY_SSL", "false").lower() in (
     "1",
     "true",
     "yes",

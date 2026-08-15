@@ -44,7 +44,7 @@ Create a `.env` file (see `.env.example`):
 | `ELASTIC_INDEXS` | Index or pattern to search (production: `.kibana-event-log-ds`) |
 | `ELASTIC_BATCH_SIZE` | Hits per ES page (default `500`) |
 | `ELASTIC_QUERY` | Optional Lucene `query_string` filter (default `*`) |
-| `ELASTIC_VERIFY_SSL` | Verify TLS certs for ES (default `true`) |
+| `ELASTIC_VERIFY_SSL` | Verify TLS certs for ES (default `false`) |
 | `ELASTIC_USER` / `ELASTIC_PASS` | Basic auth (optional) |
 | `ELASTIC_TOKEN` | API key auth (optional; use instead of user/pass) |
 | `POLLER_INTERVAL` | Seconds between poll cycles (default `240`) |
@@ -114,7 +114,7 @@ docker run -d --name elastic-poller-es \
   docker.elastic.co/elasticsearch/elasticsearch:8.19.0
 ```
 
-Point `.env` at `http://localhost:9200`, set `ELASTIC_VERIFY_SSL=false`, seed a test index, and run the poller.
+Point `.env` at `http://localhost:9200`, seed a test index, and run the poller.
 
 ## Tests
 
@@ -128,4 +128,4 @@ CI runs the same command on push and pull requests (see `.github/workflows/test.
 
 - Use `.kibana-event-log-ds` (or your Kibana event log data stream) for alerting events — not filebeat log indices
 - `metrics.alert.threshold` and similar rule types carry better correlation data than `logs.alert.document.count` execute-start events
-- Set `ELASTIC_VERIFY_SSL=false` only for local/dev clusters with self-signed certificates
+- Set `ELASTIC_VERIFY_SSL=true` in production when Elasticsearch uses valid TLS certificates
