@@ -4,7 +4,10 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
+
+import requests
 
 import common_event
 import elastic_poller
@@ -66,8 +69,16 @@ class BuildLogsQueryTests(unittest.TestCase):
         self.assertEqual(range_filter["format"], "epoch_millis")
         self.assertNotIn("gte", range_filter)
 
-    def test_sort_includes_timestamp_and_shard_doc_tiebreaker(self):
+    def test_sort_omits_shard_doc_without_pit(self):
+        """_shard_doc outside a PIT is what ES rejects with a 400."""
         query = elastic_poller.build_logs_query(text="*", bookmark_ms=0, size=500)
+        self.assertEqual(query["sort"], [{"@timestamp": {"order": "asc"}}])
+        self.assertNotIn("pit", query)
+
+    def test_sort_includes_shard_doc_when_pit_supplied(self):
+        query = elastic_poller.build_logs_query(
+            text="*", bookmark_ms=0, size=500, pit_id="pit-abc"
+        )
         self.assertEqual(
             query["sort"],
             [{"@timestamp": {"order": "asc"}}, {"_shard_doc": "asc"}],
@@ -112,20 +123,29 @@ class HitTimestampTests(unittest.TestCase):
         )
 
 
-class BookmarkFileTests(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.original_bookmark_dir = elastic_poller.bookmark_dir
-        self.original_bookmark_file = elastic_poller.bookmark_file
-        elastic_poller.bookmark_dir = self.temp_dir.name
-        elastic_poller.bookmark_file = os.path.join(
-            self.temp_dir.name, "testorg.elastic.bookmark"
-        )
+class GlobalPatchMixin:
+    """Rebind elastic_poller module globals for the duration of one test.
 
-    def tearDown(self):
-        elastic_poller.bookmark_dir = self.original_bookmark_dir
-        elastic_poller.bookmark_file = self.original_bookmark_file
-        self.temp_dir.cleanup()
+    patch.object + addCleanup restores unconditionally, so a global can never
+    leak into a later test the way a hand-written tearDown can forget to.
+    """
+
+    def _patch(self, name, value, target=elastic_poller):
+        patcher = patch.object(target, name, value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _use_temp_bookmark(self, filename="testorg.elastic.bookmark"):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        self._patch("bookmark_dir", temp_dir.name)
+        self._patch("bookmark_file", os.path.join(temp_dir.name, filename))
+        return temp_dir
+
+
+class BookmarkFileTests(GlobalPatchMixin, unittest.TestCase):
+    def setUp(self):
+        self._use_temp_bookmark()
 
     def test_set_and_get_bookmark_roundtrip(self):
         elastic_poller.setBookmark(1786641258556)
@@ -135,26 +155,26 @@ class BookmarkFileTests(unittest.TestCase):
         self.assertEqual(elastic_poller.getBookmark(), 0)
 
 
-class PollCycleTests(unittest.TestCase):
+class PollCycleTests(GlobalPatchMixin, unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.original_bookmark_dir = elastic_poller.bookmark_dir
-        self.original_bookmark_file = elastic_poller.bookmark_file
-        elastic_poller.bookmark_dir = self.temp_dir.name
-        elastic_poller.bookmark_file = os.path.join(
-            self.temp_dir.name, "testorg.elastic.bookmark"
-        )
-        elastic_poller.ELASTIC_BATCH_SIZE = 500
+        self._use_temp_bookmark()
+        self._patch("ELASTIC_BATCH_SIZE", 500)
+        self._patch("ELASTIC_INDEX", "test-index")
+        self._patch("ELASTIC_URL", "http://es.invalid:9200")
+        # poll_cycle now opens a real PIT; stub the lifecycle for these tests.
+        self.mock_open_pit = self._patch_call("open_point_in_time", return_value="pit-1")
+        self.mock_close_pit = self._patch_call("close_point_in_time", return_value=True)
 
-    def tearDown(self):
-        elastic_poller.bookmark_dir = self.original_bookmark_dir
-        elastic_poller.bookmark_file = self.original_bookmark_file
-        self.temp_dir.cleanup()
+    def _patch_call(self, name, **kwargs):
+        patcher = patch.object(elastic_poller, name, **kwargs)
+        mock = patcher.start()
+        self.addCleanup(patcher.stop)
+        return mock
 
     @patch.object(elastic_poller, "send_event", return_value=True)
     @patch.object(elastic_poller, "fetch_elasticsearch_hits")
     def test_poll_cycle_advances_bookmark_on_success(self, mock_fetch, mock_send):
-        mock_fetch.return_value = ([SAMPLE_HIT], 5)
+        mock_fetch.return_value = ([SAMPLE_HIT], 5, "pit-1")
         result = elastic_poller.poll_cycle(1786641258000, 1786641258000, True)
         self.assertEqual(result, 1786641258365)
         self.assertEqual(elastic_poller.getBookmark(), 1786641258365)
@@ -164,7 +184,7 @@ class PollCycleTests(unittest.TestCase):
     @patch.object(elastic_poller, "fetch_elasticsearch_hits")
     def test_poll_cycle_does_not_advance_bookmark_on_delivery_failure(self, mock_fetch, mock_send):
         elastic_poller.setBookmark(1786641258000)
-        mock_fetch.return_value = ([SAMPLE_HIT], 5)
+        mock_fetch.return_value = ([SAMPLE_HIT], 5, "pit-1")
         result = elastic_poller.poll_cycle(1786641258000, 1786641258000, True)
         self.assertEqual(result, 1786641258000)
         self.assertEqual(elastic_poller.getBookmark(), 1786641258000)
@@ -172,8 +192,7 @@ class PollCycleTests(unittest.TestCase):
     @patch.object(elastic_poller, "send_event", return_value=True)
     @patch.object(elastic_poller, "fetch_elasticsearch_hits")
     def test_poll_cycle_paginates_with_search_after(self, mock_fetch, mock_send):
-        page_size = 2
-        elastic_poller.ELASTIC_BATCH_SIZE = page_size
+        self._patch("ELASTIC_BATCH_SIZE", 2)
         hit_a = dict(SAMPLE_HIT)
         hit_b = dict(SAMPLE_HIT, _id="bbbb", sort=[1786641258365, 1])
         hit_c = dict(SAMPLE_HIT, _id="cccc", sort=[1786641259000, 2])
@@ -181,14 +200,324 @@ class PollCycleTests(unittest.TestCase):
         hit_c["_source"]["@timestamp"] = "2026-08-13T17:14:19.000Z"
 
         mock_fetch.side_effect = [
-            ([hit_a, hit_b], 5),
-            ([hit_c], 3),
+            ([hit_a, hit_b], 5, "pit-2"),
+            ([hit_c], 3, "pit-2"),
         ]
 
         result = elastic_poller.poll_cycle(1786641258000, 1786641258000, True)
         self.assertEqual(mock_fetch.call_count, 2)
         self.assertEqual(mock_fetch.call_args_list[1].kwargs["search_after"], [1786641258365, 1])
+        self.assertEqual(mock_fetch.call_args_list[1].kwargs["pit_id"], "pit-2")
         self.assertEqual(result, 1786641259000)
+
+
+class BuildLogsQueryPitTests(unittest.TestCase):
+    def test_pit_block_carries_id_and_keep_alive(self):
+        query = elastic_poller.build_logs_query(
+            text="*", bookmark_ms=0, size=500, pit_id="pit-abc", keep_alive="2m"
+        )
+        self.assertEqual(query["pit"], {"id": "pit-abc", "keep_alive": "2m"})
+
+    def test_keep_alive_defaults_to_module_constant(self):
+        query = elastic_poller.build_logs_query(
+            text="*", bookmark_ms=0, size=500, pit_id="pit-abc"
+        )
+        self.assertEqual(
+            query["pit"]["keep_alive"], elastic_poller.ELASTIC_PIT_KEEP_ALIVE
+        )
+
+    def test_shard_doc_present_if_and_only_if_pit_present(self):
+        """The invariant the reported bug violated, asserted directly.
+
+        ES only materializes _shard_doc inside a point-in-time, so the two must
+        appear together or not at all.
+        """
+        for pit_id in (None, "", "pit-abc"):
+            with self.subTest(pit_id=pit_id):
+                query = elastic_poller.build_logs_query(
+                    text="*", bookmark_ms=0, size=500, pit_id=pit_id
+                )
+                has_shard_doc = "_shard_doc" in json.dumps(query["sort"])
+                self.assertEqual(has_shard_doc, "pit" in query)
+                self.assertEqual(has_shard_doc, bool(pit_id))
+
+    def test_search_after_and_pit_coexist(self):
+        query = elastic_poller.build_logs_query(
+            text="*",
+            bookmark_ms=0,
+            size=500,
+            pit_id="pit-abc",
+            search_after=[1786641258365, 7],
+        )
+        self.assertEqual(query["search_after"], [1786641258365, 7])
+        self.assertIn("pit", query)
+
+
+def _fake_response(status_code=200, payload=None, text=""):
+    """Minimal stand-in for requests.Response."""
+    response = unittest.mock.Mock()
+    response.status_code = status_code
+    response.text = text or json.dumps(payload or {})
+    response.content = b"x"
+    response.json.return_value = payload if payload is not None else {}
+    response.raise_for_status.return_value = None
+    return response
+
+
+def _error_response(status_code, text):
+    """A response whose raise_for_status raises, as requests does on 4xx/5xx."""
+    response = _fake_response(status_code=status_code, payload={}, text=text)
+    error = requests.HTTPError(f"{status_code} error", response=response)
+    response.raise_for_status.side_effect = error
+    return response
+
+
+class EsRequestTests(unittest.TestCase):
+    """Covers the wire-level behaviour no test previously exercised."""
+
+    def setUp(self):
+        patcher = patch.object(elastic_poller.requests, "request")
+        self.mock_request = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_request.return_value = _fake_response(payload={"ok": True})
+
+    def _called_url(self):
+        return self.mock_request.call_args.args[1]
+
+    def test_search_url_includes_index_when_no_pit(self):
+        with patch.object(elastic_poller, "ELASTIC_URL", "http://es.invalid:9200"):
+            elastic_poller.query_elasticsearch("my-index", {"size": 1}, verify_ssl=False)
+        self.assertTrue(self._called_url().endswith("/my-index/_search"))
+
+    def test_search_url_omits_index_when_pit_active(self):
+        """A PIT pins the index set; naming it in the path too is an error."""
+        with patch.object(elastic_poller, "ELASTIC_URL", "http://es.invalid:9200"):
+            elastic_poller.query_elasticsearch(None, {"size": 1}, verify_ssl=False)
+        self.assertTrue(self._called_url().endswith("/_search"))
+        self.assertNotIn("my-index", self._called_url())
+
+    def test_api_key_sets_authorization_header(self):
+        elastic_poller._es_request(
+            "GET", "_cluster/health", base_url="http://es.invalid:9200", api_key="k1"
+        )
+        headers = self.mock_request.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "ApiKey k1")
+        self.assertIsNone(self.mock_request.call_args.kwargs["auth"])
+
+    def test_basic_auth_sets_auth_tuple(self):
+        elastic_poller._es_request(
+            "GET",
+            "_cluster/health",
+            base_url="http://es.invalid:9200",
+            username="u",
+            password="p",
+        )
+        self.assertEqual(self.mock_request.call_args.kwargs["auth"], ("u", "p"))
+
+    def test_api_key_and_password_together_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            elastic_poller._es_request(
+                "GET",
+                "_cluster/health",
+                base_url="http://es.invalid:9200",
+                api_key="k1",
+                username="u",
+                password="p",
+            )
+
+    def test_short_base_url_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            elastic_poller._es_request("GET", "_cluster/health", base_url="")
+
+    def test_http_error_wrapped_with_status_and_body(self):
+        body = (
+            '{"error":{"root_cause":[{"type":"illegal_argument_exception",'
+            '"reason":"[_shard_doc] sort field cannot be used without [point in time]"}]}}'
+        )
+        self.mock_request.return_value = _error_response(400, body)
+        with self.assertRaises(elastic_poller.ElasticsearchQueryError) as ctx:
+            elastic_poller._es_request(
+                "POST", "idx/_search", body={}, base_url="http://es.invalid:9200"
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("point in time", str(ctx.exception))
+        self.assertFalse(ctx.exception.is_missing_context)
+
+    def test_404_body_sets_is_missing_context(self):
+        self.mock_request.return_value = _error_response(
+            404, '{"error":{"type":"search_context_missing_exception"}}'
+        )
+        with self.assertRaises(elastic_poller.ElasticsearchQueryError) as ctx:
+            elastic_poller._es_request(
+                "POST", "_search", body={}, base_url="http://es.invalid:9200"
+            )
+        self.assertTrue(ctx.exception.is_missing_context)
+
+
+class PointInTimeTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(elastic_poller.requests, "request")
+        self.mock_request = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.conn = {"base_url": "http://es.invalid:9200", "verify_ssl": False}
+
+    def test_open_posts_to_index_pit_with_keep_alive_param(self):
+        self.mock_request.return_value = _fake_response(payload={"id": "pit-abc"})
+        pit_id = elastic_poller.open_point_in_time(
+            "my-index", keep_alive="5m", **self.conn
+        )
+        self.assertEqual(pit_id, "pit-abc")
+        self.assertEqual(self.mock_request.call_args.args[0], "POST")
+        self.assertTrue(self.mock_request.call_args.args[1].endswith("/my-index/_pit"))
+        self.assertEqual(
+            self.mock_request.call_args.kwargs["params"], {"keep_alive": "5m"}
+        )
+        # Opening a PIT is a bodyless POST.
+        self.assertIsNone(self.mock_request.call_args.kwargs["json"])
+
+    def test_open_raises_when_no_id_returned(self):
+        self.mock_request.return_value = _fake_response(payload={})
+        with self.assertRaises(elastic_poller.ElasticsearchQueryError):
+            elastic_poller.open_point_in_time("my-index", **self.conn)
+
+    def test_close_deletes_pit_with_id_body(self):
+        self.mock_request.return_value = _fake_response(payload={"succeeded": True})
+        self.assertTrue(elastic_poller.close_point_in_time("pit-abc", **self.conn))
+        self.assertEqual(self.mock_request.call_args.args[0], "DELETE")
+        self.assertTrue(self.mock_request.call_args.args[1].endswith("/_pit"))
+        self.assertEqual(self.mock_request.call_args.kwargs["json"], {"id": "pit-abc"})
+
+    def test_close_returns_false_on_404_without_raising(self):
+        self.mock_request.return_value = _error_response(404, "gone")
+        self.assertFalse(elastic_poller.close_point_in_time("pit-abc", **self.conn))
+
+    def test_close_swallows_other_errors(self):
+        """close runs in a finally and must never mask the original exception."""
+        self.mock_request.return_value = _error_response(500, "boom")
+        self.assertFalse(elastic_poller.close_point_in_time("pit-abc", **self.conn))
+
+    def test_close_noop_on_none_id(self):
+        self.assertFalse(elastic_poller.close_point_in_time(None, **self.conn))
+        self.mock_request.assert_not_called()
+
+
+class FetchHitsPitTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(elastic_poller, "query_elasticsearch")
+        self.mock_query = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_returns_rotated_pit_id_from_response(self):
+        self.mock_query.return_value = {
+            "took": 3,
+            "pit_id": "pit-2",
+            "hits": {"hits": [SAMPLE_HIT]},
+        }
+        hits, took, pit_id = elastic_poller.fetch_elasticsearch_hits(0, pit_id="pit-1")
+        self.assertEqual(pit_id, "pit-2")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(took, 3)
+
+    def test_returns_input_pit_id_when_response_omits_it(self):
+        self.mock_query.return_value = {"took": 1, "hits": {"hits": []}}
+        _hits, _took, pit_id = elastic_poller.fetch_elasticsearch_hits(0, pit_id="pit-1")
+        self.assertEqual(pit_id, "pit-1")
+
+    def test_index_omitted_from_search_when_pit_supplied(self):
+        self.mock_query.return_value = {"took": 1, "hits": {"hits": []}}
+        elastic_poller.fetch_elasticsearch_hits(0, pit_id="pit-1")
+        self.assertIsNone(self.mock_query.call_args.kwargs["index"])
+
+    def test_index_used_when_no_pit(self):
+        self.mock_query.return_value = {"took": 1, "hits": {"hits": []}}
+        with patch.object(elastic_poller, "ELASTIC_INDEX", "my-index"):
+            elastic_poller.fetch_elasticsearch_hits(0)
+        self.assertEqual(self.mock_query.call_args.kwargs["index"], "my-index")
+
+
+class PollCyclePitLifecycleTests(GlobalPatchMixin, unittest.TestCase):
+    def setUp(self):
+        self._use_temp_bookmark()
+        self._patch("ELASTIC_BATCH_SIZE", 2)
+        self._patch("ELASTIC_INDEX", "test-index")
+        self._patch("ELASTIC_URL", "http://es.invalid:9200")
+
+        self.mock_open = self._start(patch.object(elastic_poller, "open_point_in_time"))
+        self.mock_open.return_value = "pit-1"
+        self.mock_close = self._start(
+            patch.object(elastic_poller, "close_point_in_time", return_value=True)
+        )
+        self.mock_fetch = self._start(
+            patch.object(elastic_poller, "fetch_elasticsearch_hits")
+        )
+        self.mock_send = self._start(
+            patch.object(elastic_poller, "send_event", return_value=True)
+        )
+
+    def _start(self, patcher):
+        mock = patcher.start()
+        self.addCleanup(patcher.stop)
+        return mock
+
+    def test_pit_opened_once_and_closed_once_on_success(self):
+        self.mock_fetch.return_value = ([SAMPLE_HIT], 5, "pit-1")
+        elastic_poller.poll_cycle(0, 0, True)
+        self.mock_open.assert_called_once()
+        self.mock_close.assert_called_once()
+        self.assertEqual(self.mock_close.call_args.args[0], "pit-1")
+
+    def test_pit_closed_when_delivery_fails(self):
+        self.mock_fetch.return_value = ([SAMPLE_HIT], 5, "pit-1")
+        self.mock_send.return_value = False
+        result = elastic_poller.poll_cycle(1786641258000, 0, True)
+        self.assertEqual(result, 1786641258000)
+        self.mock_close.assert_called_once_with("pit-1", **elastic_poller._es_conn_kwargs())
+
+    def test_pit_closed_when_search_raises(self):
+        self.mock_fetch.side_effect = elastic_poller.ElasticsearchQueryError(
+            "boom", status_code=500, body="cluster_block_exception"
+        )
+        result = elastic_poller.poll_cycle(1786641258000, 0, True)
+        self.assertEqual(result, 1786641258000)
+        self.assertEqual(self.mock_close.call_args.args[0], "pit-1")
+
+    def test_expired_pit_is_not_closed_and_cycle_aborts(self):
+        self.mock_fetch.side_effect = elastic_poller.ElasticsearchQueryError(
+            "gone", status_code=404, body="search_context_missing_exception"
+        )
+        result = elastic_poller.poll_cycle(1786641258000, 0, True)
+        self.assertEqual(result, 1786641258000)
+        # Already released server-side; closing it again would be a pointless 404.
+        self.assertIsNone(self.mock_close.call_args.args[0])
+
+    def test_pit_open_failure_returns_bookmark_unchanged_and_does_not_fetch(self):
+        self.mock_open.side_effect = elastic_poller.ElasticsearchQueryError(
+            "no such index", status_code=404, body="index_not_found_exception"
+        )
+        result = elastic_poller.poll_cycle(1786641258000, 0, True)
+        self.assertEqual(result, 1786641258000)
+        self.mock_fetch.assert_not_called()
+        self.mock_close.assert_not_called()
+
+    def test_rotated_pit_id_is_threaded_into_next_page_and_closed(self):
+        hit_a = dict(SAMPLE_HIT)
+        hit_b = dict(SAMPLE_HIT, _id="bbbb", sort=[1786641258365, 1])
+        self.mock_fetch.side_effect = [
+            ([hit_a, hit_b], 5, "pit-2"),
+            ([], 1, "pit-3"),
+        ]
+        elastic_poller.poll_cycle(0, 0, True)
+        self.assertEqual(self.mock_fetch.call_args_list[1].kwargs["pit_id"], "pit-2")
+        # The latest id must be the one released, not the one we opened with.
+        self.assertEqual(self.mock_close.call_args.args[0], "pit-3")
+
+    def test_missing_sort_on_last_hit_ends_cycle_without_keyerror(self):
+        no_sort = {k: v for k, v in SAMPLE_HIT.items() if k != "sort"}
+        self.mock_fetch.return_value = ([dict(no_sort), dict(no_sort)], 5, "pit-1")
+        result = elastic_poller.poll_cycle(0, 0, True)
+        self.assertEqual(result, 1786641258365)
+        self.assertEqual(self.mock_fetch.call_count, 1)
+        self.mock_close.assert_called_once()
 
 
 class EventMappingTests(unittest.TestCase):
