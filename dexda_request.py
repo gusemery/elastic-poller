@@ -171,13 +171,13 @@ class DexdaRequest:
             raise
 
     def batched(self, iterable: Iterable[Any], size: int) -> Iterable[List[Any]]:
-       """Yield successive `size`-item lists from *iterable*."""
-       it = iter(iterable)
-       while True:
-          chunk = list(islice(it, size))
-          if not chunk:
-              break
-          yield chunk
+        """Yield successive `size`-item lists from *iterable*."""
+        it = iter(iterable)
+        while True:
+            chunk = list(islice(it, size))
+            if not chunk:
+                break
+            yield chunk
 
     def writePayload(self, data: str):
         events = json.dumps(data, indent=4)
@@ -201,55 +201,49 @@ class DexdaRequest:
 
         batchcount = 100
         totalCount = 0
+        all_succeeded = True
         for batch in self.batched(data, batchcount):
-            totalCount = totalCount + batchcount
+            totalCount = totalCount + len(batch)
             print('Batch (' + str(totalCount) + ')')
 
-            #   access_token = self.retrieve_access_token()
             auth_header = {"Authorization": f"Bearer {access_token.get('access_token')}"}
             headers = {**self._HEADERS, **auth_header}
-            
-    #          logging.debug("JSON data to be sent\n%s", json.dumps(data, indent = 4))
-            attempt = 1
+
             retry_max = 3
             retry_backoff = 5
+            batch_succeeded = False
+            response = None
             for attempt in range(retry_max):
-                # print(json.dumps(batch, indent=4))
                 try:
                     response = requests.post(
-                        url = self._data_endpoint,
-                        data = json.dumps(batch),
-                        headers = headers,
+                        url=self._data_endpoint,
+                        data=json.dumps(batch),
+                        headers=headers,
                         timeout=360
                     )
-                    # time.sleep(10)
                     response.raise_for_status()
                     logging.info("Response status code: %s\n"
                         "Response body: %s",
                         response.status_code, response.json())
-                    # break out of for loop to stop attempts since response was OK
+                    batch_succeeded = True
                     break
-                except requests.exceptions.RequestException as e:
-                    # 422 is handled specifically as it is sent when there is an
-                    # issue is the payload data. Otherwise all other 4xx codes are
-                    # considered unrecoverable by merely resending
-                    if response.status_code == 422:
+                except requests.exceptions.RequestException:
+                    if response is not None and response.status_code == 422:
                         print("Error detected in payload data\n%s",
                                     response.json())
                         raise ValueError(response.json()) from None
-                    if 400 <= response.status_code < 500:
+                    # Unrecoverable client errors: persist payload and fail the send
+                    if response is not None and 400 <= response.status_code < 500:
                         self.writePayload(batch)
-                        # print("Unable to retry due to 4xx error code\n%s",
-                        #             response.json())
-                        # print("Payload : %s", batch)
+                        all_succeeded = False
                         break
                     print("Payload: \n%s", batch)
                     print("Exception in send()\n%s",
                             str(traceback.format_exc()))
-                    time.sleep(retry_backoff * attempt)
-                    attempt += 1
-                    
-                if attempt == retry_max:    
-                    logging.error("Maximum retries exhausted")
-                    return   False
-        return True
+                    time.sleep(retry_backoff * (attempt + 1))
+
+            if not batch_succeeded:
+                all_succeeded = False
+                if response is None or not (400 <= response.status_code < 500):
+                    logging.error("Maximum retries exhausted for batch")
+        return all_succeeded

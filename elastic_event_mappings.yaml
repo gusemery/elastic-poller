@@ -10,11 +10,11 @@ mappings:
   # The following fields are not mandatory, so do not require a list of
   # jsonpath mappings
   event_domain: # Only for use in tenant-federated environments
-  event_id: ["$._source.kibana.alert.uuid"]
+  # Tried in order: active alert UUID, rule execution UUID (event-log), then ES _id
+  event_id: ["$._source.kibana.alert.uuid", "$._source.kibana.alert.rule.execution.uuid", "$._id"]
   event_details:
   event_ci_link:
   event_name_link:
-  event_source_id: #["$.eventId"]
   event_source_id_link: #["$.eventDetailsUrl"]
 transforms:
   event_severity:
@@ -25,7 +25,7 @@ transforms:
     indeterminate: ["sdt", "maintenance", 1, "False"]
     clear: ["success", "clear", "CLOSED", 0, 255]
 timestamps:
-  type: "unix" # "unix" for unix timestamp, "datetime" for datetime string
+  type: "datetime" # "unix" for unix timestamp, "datetime" for datetime string
   # The other options are only used if the #type is "datetime"
   day_first: false
   year_first: false # Use if year is given in 2 digit format
