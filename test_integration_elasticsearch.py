@@ -429,5 +429,94 @@ class ElasticsearchIntegrationTests(unittest.TestCase):
         self.assertFalse(elastic_poller.close_point_in_time(pit_id, **conn))
 
 
+@requires_es
+class MultiIndexIntegrationTests(unittest.TestCase):
+    """ELASTIC_INDEXS is interpolated straight into the Elasticsearch path.
+
+    The plural name is not a misnomer: ES path syntax accepts a comma-separated
+    list and wildcards, so one setting has always been able to span several
+    indices. The original upstream readme documented it as `.ds-file*`.
+
+    Moving to a point-in-time changes which endpoint receives that value, so
+    these tests pin that _pit accepts the same syntax _search does. Without
+    them, a future change could quietly reduce the poller to a single index.
+    """
+
+    PREFIX = f"poller-multi-{uuid.uuid4().hex[:8]}"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.indices = [f"{cls.PREFIX}-{suffix}" for suffix in ("alpha", "beta")]
+        cls.addClassCleanup(cls._cleanup)
+        lines = []
+        for position, index in enumerate(cls.indices):
+            response = requests.put(
+                f"{ES_TEST_URL}/{index}",
+                json={"settings": {"number_of_shards": 2, "number_of_replicas": 0}},
+                timeout=30,
+            )
+            response.raise_for_status()
+            for i in range(4):
+                doc_id = f"{index}-{i}"
+                stamp = TAIL_START + timedelta(seconds=position * 10 + i)
+                timestamp = stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                lines.append(json.dumps({"index": {"_index": index, "_id": doc_id}}))
+                lines.append(json.dumps(_doc(timestamp, i, "multi")))
+
+        response = requests.post(
+            f"{ES_TEST_URL}/_bulk",
+            params={"refresh": "wait_for"},
+            data=("\n".join(lines) + "\n").encode("utf-8"),
+            headers={"Content-Type": "application/x-ndjson"},
+            timeout=60,
+        )
+        response.raise_for_status()
+        if response.json().get("errors"):
+            raise AssertionError("bulk seed failed for multi-index fixtures")
+        cls.expected_ids = {
+            f"{index}-{i}" for index in cls.indices for i in range(4)
+        }
+
+    @classmethod
+    def _cleanup(cls):
+        try:
+            requests.delete(f"{ES_TEST_URL}/{cls.PREFIX}-*", timeout=30)
+        except requests.RequestException:
+            pass
+
+    def _run_cycle_over(self, index_expression):
+        collector = _Collector()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        patches = {
+            "ELASTIC_URL": ES_TEST_URL,
+            "ELASTIC_INDEX": index_expression,
+            "ELASTIC_VERIFY_SSL": False,
+            "ELASTIC_BATCH_SIZE": 3,
+            "ELASTIC_QUERY": "*",
+            "ELASTIC_USER": None,
+            "ELASTIC_PASS": None,
+            "ELASTIC_TOKEN": None,
+            "send_event": collector,
+            "bookmark_dir": temp_dir.name,
+            "bookmark_file": os.path.join(temp_dir.name, "multi.bookmark"),
+        }
+        for name, value in patches.items():
+            patcher = patch.object(elastic_poller, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        elastic_poller.poll_cycle(0, 0, False)
+        return collector
+
+    def test_comma_separated_indices_are_all_polled(self):
+        collector = self._run_cycle_over(",".join(self.indices))
+        self.assertEqual(set(collector.ids), self.expected_ids)
+
+    def test_wildcard_index_pattern_is_expanded(self):
+        collector = self._run_cycle_over(f"{self.PREFIX}-*")
+        self.assertEqual(set(collector.ids), self.expected_ids)
+
+
 if __name__ == "__main__":
     unittest.main()

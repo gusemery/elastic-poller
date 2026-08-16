@@ -48,7 +48,7 @@ Create a `.env` file (see `.env.example`):
 | `DEXDA_ID` | Edwin API client ID |
 | `DEXDA_TOKEN` | Edwin API client secret |
 | `ELASTIC_URL` | Elasticsearch base URL (e.g. `https://es-host:9200`) |
-| `ELASTIC_INDEXS` | Index or pattern to search (production: `.kibana-event-log-ds`). The trailing `S` is a legacy name kept for compatibility with deployed `.env` files. |
+| `ELASTIC_INDEXS` | Index, comma-separated list, or wildcard pattern to search (production: `.kibana-event-log-ds`). The trailing `S` is a legacy variable name, kept for compatibility with deployed `.env` files. |
 | `ELASTIC_BATCH_SIZE` | Hits per ES page (default `500`) |
 | `ELASTIC_QUERY` | Optional Lucene `query_string` filter (default `*`) |
 | `ELASTIC_VERIFY_SSL` | Verify TLS certs for ES (default `false`) |
@@ -59,6 +59,21 @@ Create a `.env` file (see `.env.example`):
 | `BOOKMARK_PATH` | Directory for bookmark file (default: current directory) |
 | `DEBUG` | Print debug output (`true`/`false`) |
 | `LOG` | Enable logging (`true`/`false`) |
+
+### Selecting indices
+
+`ELASTIC_INDEXS` is passed straight through to Elasticsearch, so it accepts any
+index expression the ES path syntax supports — the plural name is not a
+misnomer:
+
+```bash
+ELASTIC_INDEXS=.kibana-event-log-ds              # one index or data stream
+ELASTIC_INDEXS=.ds-file*                         # wildcard pattern
+ELASTIC_INDEXS=logs-app-a,logs-app-b             # comma-separated list
+```
+
+A single point-in-time spans every matched index, so pagination stays correct
+across all of them within a cycle.
 
 ### Elasticsearch query filter
 
