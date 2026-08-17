@@ -6,8 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  unit:
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,5 +24,77 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Discovery picks up the integration module too, but it skips itself
+      # because ES_TEST_URL is unset here.
       - name: Run unit tests
-        run: python -m unittest test_elastic_poller.py -v
+        run: python -m unittest discover -s . -p "test_*.py" -v
+
+  integration:
+    name: Integration (ES ${{ matrix.es-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 8.11.4 is not redundant with 8.19.20. Elastic relaxed the _shard_doc
+        # validation during the 8.x line: 8.11.4 rejects `_shard_doc` outside a
+        # point-in-time with HTTP 400, while 8.19.20 and 9.5.1 accept it. A
+        # matrix of only the latest releases goes green on the very bug this
+        # suite exists to catch, so keep the oldest supported version pinned.
+        es-version: ["8.11.4", "8.19.20", "9.5.1"]
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:${{ matrix.es-version }}
+        env:
+          # single-node also disables the bootstrap checks, which is what lets
+          # ES start on a runner where vm.max_map_count is below 262144. You
+          # cannot sysctl before a service container starts, so this is
+          # load-bearing rather than cosmetic.
+          discovery.type: single-node
+          # Both 8.x and 9.x default security to on, which turns on HTTPS and a
+          # bootstrap password. Values must be quoted strings: a bare YAML
+          # false is a boolean and Actions mis-serializes it.
+          xpack.security.enabled: "false"
+          xpack.security.http.ssl.enabled: "false"
+          xpack.license.self_generated.type: basic
+          ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+          cluster.routing.allocation.disk.threshold_enabled: "false"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 30
+          --health-start-period 45s
+    env:
+      ES_TEST_URL: http://localhost:9200
+      # Makes setUpModule hard-fail if the URL wiring breaks, so this job can
+      # never pass by silently skipping every test.
+      ES_REQUIRE_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Belt and braces alongside the container health-check: if a future image
+      # drops curl, the health-check fails silently and the job reports only
+      # "service container never became healthy". This gives a real error.
+      - name: Wait for Elasticsearch
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s" >/dev/null; then
+              curl -s http://localhost:9200
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Elasticsearch did not become ready"
+          exit 1
+
+      - name: Run integration tests
+        run: python -m unittest test_integration_elasticsearch.py -v
