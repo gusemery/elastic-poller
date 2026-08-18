@@ -84,6 +84,8 @@ class MultiPollIntegrationTests(unittest.TestCase):
             "ELASTIC_PASS": None,
             "ELASTIC_TOKEN": None,
             "ELASTIC_PIT_KEEP_ALIVE": "1m",
+            "ELASTIC_OVERLAP_MS": 300000,
+            "BOOKMARK_PATH": self.temp_dir.name,
             "send_event": self.collector,
             "bookmark_dir": self.temp_dir.name,
             "bookmark_file": os.path.join(self.temp_dir.name, "multipoll.bookmark"),

@@ -1,6 +1,6 @@
 """Poll Elasticsearch for Kibana alerting events and forward them to Edwin."""
 
-from elastic_poller import bookmark, config, delivery, elasticsearch, poller
+from elastic_poller import bookmark, config, dedupe, delivery, elasticsearch, poller
 from elastic_poller.bookmark import getBookmark, setBookmark
 from elastic_poller.config import (
     OK,
@@ -16,6 +16,9 @@ from elastic_poller.config import (
     ELASTIC_INDEX,
     ELASTIC_PASS,
     ELASTIC_PIT_KEEP_ALIVE,
+    ELASTIC_OVERLAP_MS,
+    DEDUPE_MAX_RECORDS,
+    DEDUPE_MAX_SIZE_MB,
     ELASTIC_QUERY,
     ELASTIC_TOKEN,
     ELASTIC_URL,
@@ -32,6 +35,7 @@ from elastic_poller.config import (
     LM_LOGS_ENABLED,
     LM_LOGS_RESOURCE_ID,
     LOG_ENABLED,
+    FAILED_PAYLOAD_PATH,
     PAUSE_INTERVAL,
     edwin_client_id,
     edwin_client_token,
@@ -74,6 +78,9 @@ __all__ = [
     "ELASTIC_INDEX",
     "ELASTIC_PASS",
     "ELASTIC_PIT_KEEP_ALIVE",
+    "ELASTIC_OVERLAP_MS",
+    "DEDUPE_MAX_RECORDS",
+    "DEDUPE_MAX_SIZE_MB",
     "ELASTIC_QUERY",
     "ELASTIC_TOKEN",
     "ELASTIC_URL",
@@ -90,9 +97,11 @@ __all__ = [
     "config",
     "createEvent",
     "delivery",
+    "dedupe",
     "elasticsearch",
     "epoch_ms_to_zulu",
     "fetch_elasticsearch_hits",
+    "FAILED_PAYLOAD_PATH",
     "getBookmark",
     "hit_timestamp_ms",
     "open_point_in_time",

@@ -137,6 +137,10 @@ class GlobalPatchMixin:
         "ELASTIC_TOKEN",
         "ELASTIC_VERIFY_SSL",
         "ELASTIC_PIT_KEEP_ALIVE",
+        "ELASTIC_OVERLAP_MS",
+        "BOOKMARK_PATH",
+        "DEDUPE_MAX_RECORDS",
+        "DEDUPE_MAX_SIZE_MB",
         "EDWIN_ORG",
         "EDWIN_ID",
         "EDWIN_TOKEN",
@@ -158,6 +162,7 @@ class GlobalPatchMixin:
     def _use_temp_bookmark(self, filename="testorg.elastic.bookmark"):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
+        self._patch("BOOKMARK_PATH", temp_dir.name)
         self._patch("bookmark_dir", temp_dir.name)
         self._patch("bookmark_file", os.path.join(temp_dir.name, filename))
         return temp_dir
@@ -173,6 +178,30 @@ class BookmarkFileTests(GlobalPatchMixin, unittest.TestCase):
 
     def test_get_bookmark_creates_file_with_zero(self):
         self.assertEqual(elastic_poller.getBookmark(), 0)
+
+    def test_corrupt_bookmark_raises_actionable_error(self):
+        with open(elastic_poller.bookmark.bookmark_file, "w", encoding="utf-8") as fh:
+            fh.write("not-a-timestamp")
+        with self.assertRaises(elastic_poller.bookmark.BookmarkError):
+            elastic_poller.getBookmark()
+
+    def test_dedupe_maintains_maximum_record_count(self):
+        self._patch("DEDUPE_MAX_RECORDS", 2)
+        self._patch("DEDUPE_MAX_SIZE_MB", 256)
+        hits = [
+            dict(SAMPLE_HIT, _id=f"dedupe-{index}")
+            for index in range(3)
+        ]
+        elastic_poller.dedupe.mark_delivered(
+            hits, lambda _hit: 1786641258365
+        )
+
+        self.assertEqual(
+            elastic_poller.dedupe.maintain(0),
+            1,
+        )
+        self.assertFalse(elastic_poller.dedupe.is_delivered(hits[0]))
+        self.assertTrue(elastic_poller.dedupe.is_delivered(hits[2]))
 
 
 class PollCycleTests(GlobalPatchMixin, unittest.TestCase):
@@ -274,6 +303,27 @@ class PollCycleTests(GlobalPatchMixin, unittest.TestCase):
         self.assertEqual(mock_fetch.call_args_list[1].kwargs["search_after"], [1786641258365, 1])
         self.assertEqual(mock_fetch.call_args_list[1].kwargs["pit_id"], "pit-2")
         self.assertEqual(result, 1786641259000)
+
+    @patch.object(elastic_poller.delivery, "send_event", return_value=True)
+    @patch.object(elastic_poller.elasticsearch, "fetch_elasticsearch_hits")
+    def test_overlap_delivers_late_document_without_redelivering_old_document(
+        self, mock_fetch, mock_send
+    ):
+        late_hit = dict(SAMPLE_HIT, _id="late-document")
+        mock_fetch.return_value = ([SAMPLE_HIT], 1, "pit-1")
+        first_bookmark = elastic_poller.poll_cycle(
+            1786641258000, 1786641258000, True
+        )
+
+        mock_fetch.reset_mock()
+        mock_fetch.return_value = ([SAMPLE_HIT, late_hit], 1, "pit-1")
+        second_bookmark = elastic_poller.poll_cycle(
+            first_bookmark, first_bookmark, True
+        )
+
+        self.assertEqual(mock_send.call_count, 2)
+        self.assertEqual(len(mock_send.call_args_list[1].args[0]), 1)
+        self.assertEqual(second_bookmark, 1786641258365)
 
 
 class BuildLogsQueryPitTests(unittest.TestCase):

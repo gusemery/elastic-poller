@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -16,7 +19,7 @@ LM_LOGS_INGEST_PATH = "/rest/log/ingest"
 # Operational summaries, errors, and startup always ship when LM Logs is enabled.
 LM_OPERATIONAL_LEVEL = logging.INFO
 # SDK modules that emit verbose mapping/delivery detail at DEBUG.
-_THIRD_PARTY_LOGGERS = ("common_event", "edwin_request")
+_THIRD_PARTY_LOGGERS = ("elastic_poller.common_event", "elastic_poller.edwin_request")
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -51,6 +54,7 @@ def build_startup_context(
     poller_interval: str,
     bookmark_path: str,
     lm_logs_enabled: bool,
+    elastic_overlap_ms: int = 0,
 ) -> Dict[str, Any]:
     """Build a non-sensitive configuration snapshot for startup logging."""
     return {
@@ -66,6 +70,7 @@ def build_startup_context(
         "poller_interval": poller_interval,
         "bookmark_path": bookmark_path,
         "lm_logs_enabled": lm_logs_enabled,
+        "elastic_overlap_ms": elastic_overlap_ms,
         "event_type": "startup",
     }
 
@@ -81,6 +86,7 @@ class LmLogsHandler(logging.Handler):
         min_level: int = LM_OPERATIONAL_LEVEL,
         timeout: int = 10,
         resource_id: Optional[str] = None,
+        queue_size: int = 1000,
     ) -> None:
         super().__init__()
         self.setLevel(min_level)
@@ -88,6 +94,12 @@ class LmLogsHandler(logging.Handler):
         self.bearer_token = bearer_token
         self.resource_id = resource_id
         self.timeout = timeout
+        self._queue: queue.Queue[Dict[str, Any]] = queue.Queue(maxsize=queue_size)
+        self._last_failure_report = 0.0
+        self._worker = threading.Thread(
+            target=self._run, name="lm-logs-worker", daemon=True
+        )
+        self._worker.start()
         self._ingest_url = (
             f"https://{account}.logicmonitor.com{LM_LOGS_INGEST_PATH}"
         )
@@ -95,21 +107,38 @@ class LmLogsHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             event = self._build_event(record)
-            response = requests.post(
-                self._ingest_url,
-                headers={
-                    "Authorization": f"Bearer {self.bearer_token}",
-                    "Content-Type": "application/json",
-                },
-                json=[event],
-                timeout=self.timeout,
-            )
-            if response.status_code not in (202, 207):
-                self._report_failure(
-                    f"LM Logs ingestion returned HTTP {response.status_code}"
-                )
-        except Exception as exc:  # pragma: no cover - network failures
+            self._queue.put_nowait(event)
+        except queue.Full:
+            self._report_failure("LM Logs queue is full; dropping log record")
+        except Exception as exc:
             self._report_failure(f"LM Logs ingestion failed: {exc}")
+
+    def _run(self) -> None:
+        while True:
+            event = self._queue.get()
+            try:
+                response = requests.post(
+                    self._ingest_url,
+                    headers={
+                        "Authorization": f"Bearer {self.bearer_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=[event],
+                    timeout=self.timeout,
+                )
+                if response.status_code == 207:
+                    self._report_failure(
+                        f"LM Logs partially accepted records: {response.text[:2000]}"
+                    )
+                elif response.status_code != 202:
+                    self._report_failure(
+                        f"LM Logs ingestion returned HTTP {response.status_code}: "
+                        f"{response.text[:2000]}"
+                    )
+            except Exception as exc:  # pragma: no cover - network failures
+                self._report_failure(f"LM Logs ingestion failed: {exc}")
+            finally:
+                self._queue.task_done()
 
     def _build_event(self, record: logging.LogRecord) -> Dict[str, Any]:
         event: Dict[str, Any] = {
@@ -138,6 +167,10 @@ class LmLogsHandler(logging.Handler):
 
     @staticmethod
     def _report_failure(message: str) -> None:
+        now = time.monotonic()
+        if now - getattr(LmLogsHandler, "_last_report", 0.0) < 60:
+            return
+        LmLogsHandler._last_report = now
         sys.stderr.write(f"WARN - {message}\n")
 
 
@@ -150,8 +183,8 @@ def configure_third_party_loggers(*, debug: bool = False) -> None:
     sdk_level = logging.DEBUG if debug else logging.ERROR
     delivery_level = logging.DEBUG if debug else logging.WARNING
     levels = {
-        "common_event": sdk_level,
-        "edwin_request": delivery_level,
+        "elastic_poller.common_event": sdk_level,
+        "elastic_poller.edwin_request": delivery_level,
     }
     for name in _THIRD_PARTY_LOGGERS:
         logging.getLogger(name).setLevel(levels[name])

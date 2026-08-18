@@ -5,9 +5,9 @@
 """HTTP client for Edwin OAuth and event ingestion."""
 import json
 import logging
+import os
 import pathlib
 import time
-import traceback
 import typing
 from datetime import datetime
 from itertools import islice
@@ -18,7 +18,7 @@ import pydantic
 import requests
 import yaml
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("elastic_poller.edwin_request")
 
 
 def _normalize_auth_dict(auth_dict: dict[str, str]) -> dict[str, str]:
@@ -55,7 +55,7 @@ class EdwinRequest:
 
     _HEADERS: Dict[str, str] = {
         "Content-Type": "application/json",
-        "Accepts": "application/json",
+        "Accept": "application/json",
     }
 
     @classmethod
@@ -132,7 +132,7 @@ class EdwinRequest:
                 data={"grant_type": "client_credentials", **self._client_data},
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Accepts": "application/json",
+                    "Accept": "application/json",
                 },
                 timeout=30,
             )
@@ -141,9 +141,8 @@ class EdwinRequest:
                 raise requests.exceptions.RequestException
             return typing.cast(_EdwinAuthToken, response.json())
         except requests.exceptions.RequestException:
-            _logger.error(
-                "Exception in retrieve_access_token()\n%s",
-                str(traceback.format_exc()),
+            _logger.exception(
+                "Edwin OAuth request failed endpoint=%s", self._token_endpoint
             )
             raise
 
@@ -156,12 +155,21 @@ class EdwinRequest:
                 break
             yield chunk
 
-    def writePayload(self, data: str):
+    def writePayload(self, data: str) -> None:
+        """Persist a rejected payload when explicitly enabled."""
+        directory = os.getenv("FAILED_PAYLOAD_PATH", "")
+        if not directory:
+            _logger.warning(
+                "Edwin rejected a batch; failed payload persistence is disabled"
+            )
+            return
+        os.makedirs(directory, mode=0o700, exist_ok=True)
         events = json.dumps(data, indent=4)
         timestamp = int(datetime.now().timestamp() * 1000)
-        with open(f"bad_payloads/{timestamp}.json", "w") as fh:
+        with open(
+            os.path.join(directory, f"{timestamp}.json"), "w", encoding="utf-8"
+        ) as fh:
             fh.write(events)
-        fh.close
 
     def send(
         self,
@@ -174,7 +182,11 @@ class EdwinRequest:
         all_succeeded = True
         for batch in self.batched(data, batchcount):
             totalCount = totalCount + len(batch)
-            print("Batch (" + str(totalCount) + ")")
+            _logger.debug(
+                "Sending Edwin batch batch_end=%s batch_size=%s",
+                totalCount,
+                len(batch),
+            )
 
             auth_header = {
                 "Authorization": f"Bearer {access_token.get('access_token')}"
@@ -194,28 +206,34 @@ class EdwinRequest:
                         timeout=360,
                     )
                     response.raise_for_status()
-                    logging.info(
-                        "Response status code: %s\nResponse body: %s",
+                    _logger.info(
+                        "Edwin batch accepted status=%s batch_size=%s",
                         response.status_code,
-                        response.json(),
+                        len(batch),
                     )
                     batch_succeeded = True
                     break
                 except requests.exceptions.RequestException:
                     if response is not None and response.status_code == 422:
-                        print(
-                            "Error detected in payload data\n%s",
-                            response.json(),
+                        _logger.error(
+                            "Edwin rejected batch status=422 response=%s",
+                            response.text[:2000],
                         )
-                        raise ValueError(response.json()) from None
+                        raise ValueError(response.text[:2000]) from None
                     if response is not None and 400 <= response.status_code < 500:
                         self.writePayload(batch)
+                        _logger.error(
+                            "Edwin rejected batch status=%s response=%s",
+                            response.status_code,
+                            response.text[:2000],
+                        )
                         all_succeeded = False
                         break
-                    print("Payload: \n%s", batch)
-                    print(
-                        "Exception in send()\n%s",
-                        str(traceback.format_exc()),
+                    _logger.warning(
+                        "Edwin batch attempt failed attempt=%s/%s status=%s",
+                        attempt + 1,
+                        retry_max,
+                        response.status_code if response is not None else None,
                     )
                     time.sleep(retry_backoff * (attempt + 1))
 

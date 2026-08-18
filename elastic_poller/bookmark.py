@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 from elastic_poller import config
 
@@ -10,23 +11,54 @@ bookmark_dir = config.BOOKMARK_PATH.rstrip("/") if config.BOOKMARK_PATH else "."
 bookmark_file = os.path.join(bookmark_dir, f"{config.EDWIN_ORG}.elastic.bookmark")
 
 
+class BookmarkError(ValueError):
+    """Raised when bookmark state cannot be read or written safely."""
+
+
 def get_bookmark() -> int:
     """Read the bookmark file. Creates the file with 0 if it does not exist."""
     os.makedirs(bookmark_dir, exist_ok=True)
     if not os.path.exists(bookmark_file):
         config.logger.info("Bookmark file not found, creating it")
-        with open(bookmark_file, "w") as fh:
+        with open(bookmark_file, "w", encoding="utf-8") as fh:
             fh.write("0")
 
-    with open(bookmark_file, "r") as fh:
-        return int(float(fh.read()))
+    try:
+        with open(bookmark_file, "r", encoding="utf-8") as fh:
+            value = int(float(fh.read().strip()))
+    except (OSError, ValueError) as error:
+        config.logger.error("Invalid bookmark file %s: %s", bookmark_file, error)
+        raise BookmarkError(
+            f"Bookmark file {bookmark_file} is unreadable; preserve it and "
+            "repair or reset it before restarting"
+        ) from error
+    if value < 0:
+        raise BookmarkError(f"Bookmark file {bookmark_file} contains a negative value")
+    return value
 
 
 def set_bookmark(bookmark: int) -> None:
     """Persist the bookmark as epoch milliseconds (last successfully sent event)."""
     os.makedirs(bookmark_dir, exist_ok=True)
-    with open(bookmark_file, "w") as fh:
-        fh.write(str(int(bookmark)))
+    if bookmark < 0:
+        raise BookmarkError("Bookmark must be non-negative")
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=".bookmark-", dir=bookmark_dir, text=True
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(int(bookmark)))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary_path, bookmark_file)
+    except OSError as error:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise BookmarkError(
+            f"Could not atomically write bookmark file {bookmark_file}"
+        ) from error
 
 
 # Legacy names kept for tests and external callers.

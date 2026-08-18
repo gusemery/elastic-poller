@@ -18,7 +18,7 @@ import pydantic
 import pydantic.validators
 import yaml
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("elastic_poller.common_event")
 
 class StrEnum(str, enum.Enum):
     """Used to create StrEnum class for compatibility with Python 3.9."""
@@ -305,10 +305,11 @@ class CommonEvent:
         validated by pydantic.
         :param original_record: Original record to convert to CEF (optional).
         """
-        _logger.debug("Values passed to CommonEvent __init__\n"
-                      "mapping_dict: %s\n"
-                      "original_record: %s",
-                      mapping_dict, original_record)
+        _logger.debug(
+            "Initializing CommonEvent mapping_fields=%s has_source_record=%s",
+            list(mapping_dict),
+            original_record is not None,
+        )
         self.mappings: "_JsonpathMappings" = mappings
         self.timestamp_mappings: "_TimestampMappings" = timestamps
         self.transform_mappings: "_CefTransforms" = transforms
@@ -400,15 +401,21 @@ class CommonEvent:
                             json_path_list,
                         )
                 self.set_field(field_name, value)
-            except Exception as error:
-                _logger.info("Error in convert to CEF : ")
+            except Exception:
+                _logger.exception(
+                    "Error converting source record field=%s", field_name
+                )
     def get_cef(self) -> typing.Dict:
         """Getter for final cef object.
         :returns: entire CEF as a dict.
         """
         self._final_cef_check()
         final_cef = {"cef": self.cef_dict, "enrichments": self.enrichment_dict}
-        _logger.debug("Final CommonEvent:\n%s", final_cef)
+        _logger.debug(
+            "Final CommonEvent generated cef_fields=%s enrichment_fields=%s",
+            list(self.cef_dict),
+            list(self.enrichment_dict),
+        )
         return final_cef
 
     def _final_cef_check(self) -> None:
@@ -446,9 +453,8 @@ class CommonEvent:
         if field_name in self.cef_dict:
             if not self._check_mandatory_field(field_name, field_value):
                 _logger.debug(
-                    "Value %s of type %s is not a valid value for "
-                    "%s field; using configured default",
-                    field_value,
+                    "Value of type %s is not valid for %s field; "
+                    "using configured default",
                     type(field_value),
                     field_name,
                 )

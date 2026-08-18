@@ -80,6 +80,8 @@ class LiveDeliveryTests(unittest.TestCase):
             "ELASTIC_PASS": None,
             "ELASTIC_TOKEN": None,
             "ELASTIC_PIT_KEEP_ALIVE": "2m",
+            "ELASTIC_OVERLAP_MS": 300000,
+            "BOOKMARK_PATH": self.temp_dir.name,
             "bookmark_dir": self.temp_dir.name,
             "bookmark_file": os.path.join(self.temp_dir.name, "live.bookmark"),
         }

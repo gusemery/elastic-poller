@@ -11,39 +11,48 @@ from elastic_poller import bookmark, config, elasticsearch, poller
 
 
 def main() -> None:
-    poller.log_startup()
-    config.logger.info(
-        "Edwin org: %s | Elasticsearch: %s | Bookmark file: %s",
-        config.EDWIN_ORG,
-        lm_logs.sanitize_elastic_url(config.ELASTIC_URL),
-        bookmark.bookmark_file,
-    )
-
-    two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
-    default_bookmark = int(two_hours_ago.timestamp() * 1000)
-    bookmark_ms = default_bookmark
-    bookmark_loaded = False
-
-    stored_bookmark = bookmark.get_bookmark()
-    if stored_bookmark > 0:
-        bookmark_loaded = True
-        bookmark_ms = stored_bookmark
-
-    watermark = bookmark_ms
-    config.logger.info(
-        "Starting from bookmark %s (%s)",
-        bookmark_ms,
-        elasticsearch.epoch_ms_to_zulu(bookmark_ms),
-    )
-
-    while True:
-        bookmark_ms = poller.poll_cycle(bookmark_ms, watermark, bookmark_loaded)
+    try:
+        config.validate_config()
+        poller.log_startup()
         config.logger.info(
-            "Sleeping %s seconds until next poll cycle", config.PAUSE_INTERVAL
+            "Edwin org: %s | Elasticsearch: %s | Bookmark file: %s",
+            config.EDWIN_ORG,
+            lm_logs.sanitize_elastic_url(config.ELASTIC_URL),
+            bookmark.bookmark_file,
         )
-        time.sleep(int(config.PAUSE_INTERVAL))
 
-    sys.exit(config.OK)
+        two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+        default_bookmark = int(two_hours_ago.timestamp() * 1000)
+        bookmark_ms = default_bookmark
+        bookmark_loaded = False
+
+        stored_bookmark = bookmark.get_bookmark()
+        if stored_bookmark > 0:
+            bookmark_loaded = True
+            bookmark_ms = stored_bookmark
+
+        watermark = bookmark_ms
+        config.logger.info(
+            "Starting from bookmark %s (%s)",
+            bookmark_ms,
+            elasticsearch.epoch_ms_to_zulu(bookmark_ms),
+        )
+
+        while True:
+            bookmark_ms = poller.poll_cycle(bookmark_ms, watermark, bookmark_loaded)
+            config.logger.info(
+                "Sleeping %s seconds until next poll cycle", config.PAUSE_INTERVAL
+            )
+            time.sleep(int(config.PAUSE_INTERVAL))
+    except config.ConfigurationError as error:
+        config.logger.error("Configuration validation failed: %s", error)
+        sys.exit(config.ERROR_CODE_VALIDATION_FAILED)
+    except KeyboardInterrupt:
+        config.logger.info("Shutdown requested")
+        sys.exit(config.OK)
+    except Exception:
+        config.logger.exception("Unhandled elastic-poller failure")
+        sys.exit(config.ERROR_CODE_UNEXPECTED)
 
 
 if __name__ == "__main__":

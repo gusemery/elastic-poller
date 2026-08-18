@@ -259,6 +259,7 @@ class ElasticsearchIntegrationTests(unittest.TestCase):
 
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
+        self._patch("BOOKMARK_PATH", temp_dir.name)
         self._patch("bookmark_dir", temp_dir.name)
         self._patch("bookmark_file", os.path.join(temp_dir.name, "it.elastic.bookmark"))
 
@@ -500,6 +501,8 @@ class MultiIndexIntegrationTests(unittest.TestCase):
             "ELASTIC_USER": None,
             "ELASTIC_PASS": None,
             "ELASTIC_TOKEN": None,
+            "ELASTIC_OVERLAP_MS": 300000,
+            "BOOKMARK_PATH": temp_dir.name,
             "send_event": collector,
             "bookmark_dir": temp_dir.name,
             "bookmark_file": os.path.join(temp_dir.name, "multi.bookmark"),

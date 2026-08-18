@@ -1,6 +1,7 @@
 """Unit tests for LM Logs handler and configuration helpers."""
 
 import logging
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -74,6 +75,10 @@ class LmLogsHandlerTests(unittest.TestCase):
             resource_id="device-123",
         )
 
+    def _wait_for_delivery(self):
+        self.handler._queue.join()
+        time.sleep(0.01)
+
     @patch("lm_logs.requests.post")
     def test_emits_info_and_above_at_operational_level(self, mock_post):
         mock_post.return_value = MagicMock(status_code=202)
@@ -87,6 +92,7 @@ class LmLogsHandlerTests(unittest.TestCase):
         mock_post.assert_not_called()
 
         test_logger.info("poll cycle finished")
+        self._wait_for_delivery()
         mock_post.assert_called_once()
 
     @patch("lm_logs.requests.post")
@@ -104,6 +110,7 @@ class LmLogsHandlerTests(unittest.TestCase):
 
         mock_post.return_value = MagicMock(status_code=202)
         test_logger.debug("page fetched")
+        handler._queue.join()
         mock_post.assert_called_once()
 
     @patch("lm_logs.requests.post")
@@ -120,6 +127,7 @@ class LmLogsHandlerTests(unittest.TestCase):
         )
         record.lm_context = {"hit_count": 3, "bookmark_ms": 1000}
         self.handler.emit(record)
+        self._wait_for_delivery()
 
         mock_post.assert_called_once()
         kwargs = mock_post.call_args.kwargs
@@ -207,19 +215,19 @@ class ConfigureLoggingTests(unittest.TestCase):
     def test_third_party_loggers_quiet_by_default(self):
         lm_logs.configure_third_party_loggers(debug=False)
         self.assertEqual(
-            logging.getLogger("common_event").level, logging.ERROR
+            logging.getLogger("elastic_poller.common_event").level, logging.ERROR
         )
         self.assertEqual(
-            logging.getLogger("edwin_request").level, logging.WARNING
+            logging.getLogger("elastic_poller.edwin_request").level, logging.WARNING
         )
 
     def test_third_party_loggers_verbose_when_debug(self):
         lm_logs.configure_third_party_loggers(debug=True)
         self.assertEqual(
-            logging.getLogger("common_event").level, logging.DEBUG
+            logging.getLogger("elastic_poller.common_event").level, logging.DEBUG
         )
         self.assertEqual(
-            logging.getLogger("edwin_request").level, logging.DEBUG
+            logging.getLogger("elastic_poller.edwin_request").level, logging.DEBUG
         )
 
 

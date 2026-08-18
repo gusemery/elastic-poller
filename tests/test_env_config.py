@@ -44,5 +44,48 @@ class EnvConfigAliasTests(unittest.TestCase):
             self.assertEqual(len(config.missing_edwin_credential_names()), 3)
 
 
+class RuntimeValidationTests(unittest.TestCase):
+    def test_rejects_missing_required_settings(self):
+        with patch.dict(os.environ, {}, clear=True), patch.multiple(
+            config,
+            ELASTIC_URL=None,
+            ELASTIC_INDEX=None,
+            ELASTIC_BATCH_SIZE=500,
+            ELASTIC_OVERLAP_MS=0,
+            DEDUPE_MAX_RECORDS=250000,
+            DEDUPE_MAX_SIZE_MB=256,
+            ELASTIC_TOKEN=None,
+            ELASTIC_USER=None,
+            ELASTIC_PASS=None,
+            PAUSE_INTERVAL=240,
+            LM_LOGS_ENABLED=False,
+        ):
+            with self.assertRaises(config.ConfigurationError) as context:
+                config.validate_config()
+        self.assertIn("ELASTIC_URL is required", str(context.exception))
+
+    def test_accepts_complete_configuration(self):
+        values = {
+            "EDWIN_ORG": "org",
+            "EDWIN_ID": "id",
+            "EDWIN_TOKEN": "token",
+        }
+        with patch.dict(os.environ, values, clear=True), patch.multiple(
+            config,
+            ELASTIC_URL="https://es.example.com",
+            ELASTIC_INDEX="events-*",
+            ELASTIC_BATCH_SIZE=500,
+            ELASTIC_OVERLAP_MS=300000,
+            DEDUPE_MAX_RECORDS=250000,
+            DEDUPE_MAX_SIZE_MB=256,
+            ELASTIC_TOKEN="api-key",
+            ELASTIC_USER=None,
+            ELASTIC_PASS=None,
+            PAUSE_INTERVAL=240,
+            LM_LOGS_ENABLED=False,
+        ):
+            config.validate_config()
+
+
 if __name__ == "__main__":
     unittest.main()

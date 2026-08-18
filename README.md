@@ -30,7 +30,8 @@ The integration reads the **Kibana event log**, not raw log or Beats indices.
 
 ### 1. Configure environment
 
-Copy the example file and fill in your values:
+Copy the example file and fill in your values. The file is used only as a
+local runtime environment file; it is not copied into the image:
 
 ```bash
 cp .env.example .env
@@ -39,8 +40,6 @@ cp .env.example .env
 At minimum, set Edwin credentials and Elasticsearch connection details (see [Configuration](#configuration) below).
 
 ### 2. Build the image
-
-The Dockerfile copies `.env` into the image at build time. Rebuild after changing credentials or connection settings:
 
 ```bash
 docker build -t elastic-poller .
@@ -54,6 +53,7 @@ Mount a volume for the bookmark so progress survives restarts:
 docker run -d \
   --name elastic-poller \
   --restart unless-stopped \
+  --env-file .env \
   -v elastic-poller-data:/data \
   elastic-poller
 ```
@@ -115,8 +115,11 @@ Legacy aliases `DEXDA_ORG`, `DEXDA_ID`, and `DEXDA_TOKEN` are still accepted if 
 | `ELASTIC_PASS` | No* | — | Basic auth password |
 | `ELASTIC_TOKEN` | No* | — | API key (alternative to user/password) |
 | `ELASTIC_QUERY` | No | `*` | Lucene `query_string` filter applied in addition to the bookmark range |
-| `ELASTIC_VERIFY_SSL` | No | `false` | Set `true` to verify TLS certificates |
+| `ELASTIC_VERIFY_SSL` | No | `true` | Set `false` only for controlled test environments |
 | `ELASTIC_PIT_KEEP_ALIVE` | No | `5m` | Point-in-time lease per poll cycle (extended on each page) |
+| `ELASTIC_OVERLAP_MS` | No | `300000` | History reread window for delayed events; delivered documents are deduplicated |
+| `DEDUPE_MAX_RECORDS` | No | `250000` | Maximum retained document identities |
+| `DEDUPE_MAX_SIZE_MB` | No | `256` | Maximum deduplication database size |
 
 \* Provide either basic auth (`ELASTIC_USER` + `ELASTIC_PASS`) or `ELASTIC_TOKEN`.
 
@@ -152,6 +155,8 @@ Example on a host with `BOOKMARK_PATH=./data` and `EDWIN_ORG=acme`:
 - Created automatically on first read (initial value `0`).
 - Updated after each **successfully delivered** page.
 - **Not** advanced if Edwin delivery fails for a batch.
+- Writes are atomic; an unreadable bookmark stops startup rather than silently
+  resetting progress.
 
 To reprocess historical events, stop the integration, delete or reset the bookmark file, and restart. Setting the file to `0` causes the next run to use the default start time (now − 2 hours).
 
@@ -173,6 +178,10 @@ Create a bearer token under **Settings → Users & Roles** with Logs Manage perm
 
 When enabled, each poll cycle emits an operational summary (search for `Poll cycle finished` or `event_type=poll_summary`). Credentials and event payloads are never written to LM Logs.
 
+For permanent Edwin payload rejections, failed payload persistence is disabled
+by default. Set `FAILED_PAYLOAD_PATH` to a protected directory only when
+payload inspection is required.
+
 ## Event mapping
 
 Documents are converted to CEF using `elastic_event_mappings.yaml` in the repository root. JSONPath expressions map Elasticsearch fields to CEF attributes (CI, severity, event ID, and so on).
@@ -192,6 +201,10 @@ To customize mapping for your environment, edit that file and restart the integr
 ```
 
 - Each poll cycle uses a **point-in-time snapshot** and `search_after` pagination so pages stay consistent even when many events share the same millisecond.
+- A configurable overlap window rereads delayed or out-of-order events, while a local SQLite ledger prevents duplicate Elasticsearch documents from being sent again.
+- The deduplication database is pruned every cycle and constrained by both
+  record-count and file-size limits. If limits force eviction, duplicate
+  redelivery is possible and is reported in the cycle summary.
 - Backlogs larger than one batch are drained within a single cycle before sleeping.
 - If Edwin rejects a batch, the bookmark stays at the last successful position and the cycle retries on the next interval.
 - Edwin deduplicates on `event_id` if a small number of events are redelivered after a failure.
