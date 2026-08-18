@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LicenseRef-All-rights-reserved
 
-"""Module providing representation of, and logic for, a Dexda common event."""
+"""Module providing representation of, and logic for, an Edwin common event."""
 
 import datetime
 import enum
@@ -17,6 +17,8 @@ import jsonpath_ng
 import pydantic
 import pydantic.validators
 import yaml
+
+_logger = logging.getLogger(__name__)
 
 class StrEnum(str, enum.Enum):
     """Used to create StrEnum class for compatibility with Python 3.9."""
@@ -184,8 +186,8 @@ class _CefTransforms(pydantic.BaseModel, extra="allow", strict=True):
         return value
 
 class CommonEvent:
-    """Class representing a Dexda Common Event. Also provides logic for mapping
-    an external event format to the Dexda Common Event Format (CEF)."""
+    """Class representing an Edwin Common Event. Also provides logic for mapping
+    an external event format to the Common Event Format (CEF)."""
     _VALUE = typing.Union[str, int, bool]
 
     _CEF_MANDATORY_LIST: typing.List = [
@@ -211,7 +213,7 @@ class CommonEvent:
 #        _CefKey.EVENT_ENRICHMENTS.value,
     ]
 
-    _FILE_DIR: str = "src/logicmonitor/dexda/common_event_integration_sdk/"
+    _FILE_DIR: str = "src/logicmonitor/edwin/common_event_integration_sdk/"
 
     @classmethod
     def new_from_file(
@@ -237,9 +239,11 @@ class CommonEvent:
         try:
             _mapping_yaml: typing.Dict = yaml.safe_load(
                 _mfp.read_text(encoding = "utf-8"))
-            logging.debug("Mappings read from file: %s\n"
-                          "Full path: %s",
-                          mapping_file_name, _mfp)
+            _logger.debug(
+                "Mappings read from file: %s\nFull path: %s",
+                mapping_file_name,
+                _mfp,
+            )
         except FileNotFoundError as e:
             raise FileNotFoundError(f"Unable to find mapping config file\n"
                                     f"File name: \"{mapping_file_name}\"\n"
@@ -301,8 +305,7 @@ class CommonEvent:
         validated by pydantic.
         :param original_record: Original record to convert to CEF (optional).
         """
-        logging.disable(logging.CRITICAL)
-        logging.debug("Values passed to CommonEvent __init__\n"
+        _logger.debug("Values passed to CommonEvent __init__\n"
                       "mapping_dict: %s\n"
                       "original_record: %s",
                       mapping_dict, original_record)
@@ -361,7 +364,7 @@ class CommonEvent:
         allowable_empty_jsonpath_field_list.extend(self._CEF_AUTO_GENERATE_LIST)
         for field_name, json_path_list in iter(self.mappings):
             try:
-                logging.debug("field_name: %s, json_path_list: %s",
+                _logger.debug("field_name: %s, json_path_list: %s",
                     field_name, json_path_list)
                 value = None
                 if((field_name in allowable_empty_jsonpath_field_list and
@@ -390,19 +393,22 @@ class CommonEvent:
                     except IndexError:
                         # IndexError raised if the original record does not have
                         # the attribute that is being searched for by the jsonpath
-                        logging.warning("Unable to find matching attribute in "
+                        _logger.debug(
+                            "Unable to find matching attribute in "
                             "original_record for field %s using jsonpath(s) %s",
-                            field_name, json_path_list)
+                            field_name,
+                            json_path_list,
+                        )
                 self.set_field(field_name, value)
             except Exception as error:
-                logging.info("Error in convert to CEF : ")
+                _logger.info("Error in convert to CEF : ")
     def get_cef(self) -> typing.Dict:
         """Getter for final cef object.
         :returns: entire CEF as a dict.
         """
         self._final_cef_check()
         final_cef = {"cef": self.cef_dict, "enrichments": self.enrichment_dict}
-        logging.debug("Final CommonEvent:\n%s", final_cef)
+        _logger.debug("Final CommonEvent:\n%s", final_cef)
         return final_cef
 
     def _final_cef_check(self) -> None:
@@ -439,9 +445,13 @@ class CommonEvent:
         """
         if field_name in self.cef_dict:
             if not self._check_mandatory_field(field_name, field_value):
-                logging.warning("Value %s of type %s is not a valid value for "
-                    "%s field",
-                    field_value, type(field_value), field_name)
+                _logger.debug(
+                    "Value %s of type %s is not a valid value for "
+                    "%s field; using configured default",
+                    field_value,
+                    type(field_value),
+                    field_name,
+                )
                 field_value = self._set_empty_mandatory_field(field_name)
             if field_name == _CefKey.EVENT_SEVERITY.value:
                 self.cef_dict[field_name] = int(field_value)
@@ -455,7 +465,7 @@ class CommonEvent:
             else:
                 self.cef_dict[field_name] = str(field_value)
         else:
-            logging.info("Field %s is not required by the CEF", field_name)
+            _logger.info("Field %s is not required by the CEF", field_name)
 
     def _check_mandatory_field(
             self, field_name: str, field_value: _VALUE) -> bool:
@@ -569,7 +579,7 @@ class CommonEvent:
                     ).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-1]
             return f"{val}Z"
         except dateutil.parser.ParserError:
-            logging.error("Unable to parse %s into a timestamp", value)
+            _logger.error("Unable to parse %s into a timestamp", value)
             raise ValueError(f"Unable to parse {value} "
                             "into a timestamp") from None
 

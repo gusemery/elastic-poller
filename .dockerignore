@@ -1,0 +1,10 @@
+tests/
+scripts/
+.github/
+.git/
+*.bookmark
+__pycache__/
+*.pyc
+.env.example
+CONTRIBUTING.md
+LICENSE

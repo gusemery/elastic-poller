@@ -33,6 +33,7 @@ from unittest.mock import patch
 import requests
 
 import elastic_poller
+from tests import es_test_support, patch_target
 
 
 ES_TEST_URL = (os.getenv("ES_TEST_URL") or "").rstrip("/")
@@ -46,12 +47,14 @@ INDEX = f"poller-it-{uuid.uuid4().hex[:8]}"
 # 25 documents sharing one identical millisecond. This is the shape that breaks
 # a timestamp-only sort: without a stable tie-breaker, paginating through them
 # skips or repeats rows.
-IDENTICAL_TS = "2026-08-13T17:14:18.365Z"
-IDENTICAL_TS_MS = 1786641258365
 IDENTICAL_COUNT = 25
 TAIL_COUNT = 5
-TAIL_START = datetime(2026, 8, 13, 17, 14, 20, tzinfo=timezone.utc)
-LAST_TAIL_MS = int((TAIL_START + timedelta(seconds=TAIL_COUNT - 1)).timestamp() * 1000)
+(
+    IDENTICAL_TS,
+    IDENTICAL_TS_MS,
+    TAIL_START,
+    LAST_TAIL_MS,
+) = es_test_support.integration_fixture_times(tail_count=TAIL_COUNT)
 
 PAGE_SIZE = 3  # 30 docs over ~11 pages, so pagination is genuinely exercised
 
@@ -263,7 +266,7 @@ class ElasticsearchIntegrationTests(unittest.TestCase):
         self._patch("send_event", self.collector)
 
     def _patch(self, name, value):
-        patcher = patch.object(elastic_poller, name, value)
+        patcher = patch.object(patch_target(name), name, value)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -502,7 +505,7 @@ class MultiIndexIntegrationTests(unittest.TestCase):
             "bookmark_file": os.path.join(temp_dir.name, "multi.bookmark"),
         }
         for name, value in patches.items():
-            patcher = patch.object(elastic_poller, name, value)
+            patcher = patch.object(patch_target(name), name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 

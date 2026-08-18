@@ -2,38 +2,43 @@
 #
 # SPDX-License-Identifier: LicenseRef-All-rights-reserved
 
-"""Module providing logic sending HTTP requests to Dexda."""
+"""HTTP client for Edwin OAuth and event ingestion."""
 import json
 import logging
-import os
 import pathlib
 import time
 import traceback
 import typing
-import sys
-from datetime import datetime, timedelta
-import dotenv
-import requests
-import pydantic
-import yaml
-import common_event
+from datetime import datetime
 from itertools import islice
-from pathlib import Path
-from typing import Iterable, List, Any
+from typing import Any, Dict, Iterable, List, Union
+
+import dotenv
+import pydantic
+import requests
+import yaml
 
 _logger = logging.getLogger(__name__)
 
 
-class _DexdaAuth(pydantic.BaseModel, extra="forbid", strict=True):
-    """Pydantic model for validating user-supplied Dexda auth config."""
+def _normalize_auth_dict(auth_dict: dict[str, str]) -> dict[str, str]:
+    """Accept legacy ``dexda_org`` keys in auth payloads."""
+    normalized = dict(auth_dict)
+    if "edwin_org" not in normalized and "dexda_org" in normalized:
+        normalized["edwin_org"] = normalized["dexda_org"]
+    return normalized
 
-    dexda_org: str
+
+class _EdwinAuth(pydantic.BaseModel, extra="forbid", strict=True):
+    """Pydantic model for validating user-supplied Edwin auth config."""
+
+    edwin_org: str
     client_id: str
     client_secret: str
 
 
-class _DexdaAuthToken(typing.TypedDict):
-    """Dexda Auth Token object."""
+class _EdwinAuthToken(typing.TypedDict):
+    """Edwin OAuth token response."""
 
     access_token: str
     issued_token_type: str
@@ -43,32 +48,23 @@ class _DexdaAuthToken(typing.TypedDict):
     now: int
 
 
-class DexdaRequest:
-    """Class for sending data to Dexda."""
+class EdwinRequest:
+    """Send CEF event batches to Edwin."""
 
-    _FILE_DIR: str = "src/logicmonitor/dexda/common_event_integration_sdk/"
-    
-    _HEADERS: typing.Dict = {
+    _FILE_DIR: str = "src/logicmonitor/edwin/common_event_integration_sdk/"
+
+    _HEADERS: Dict[str, str] = {
         "Content-Type": "application/json",
-        "Accepts": "application/json"
+        "Accepts": "application/json",
     }
-    
+
     @classmethod
     def new_from_file(
         cls,
         auth_file_name: str,
         auth_file_path: typing.Optional[str] = None,
-    ) -> "DexdaRequest":
-        """Class method to start new DexdaRequest using config files.
-        :param auth_file_name: Name of auth config file to use.
-        :param auth_file_path: File path of config file to use
-        (optional).
-        :raises FileNotFoundError: Cannot find the config file using the
-        name (and filepath, if passed) given.
-        :raises ValueError: Missing one or more of the required values
-        in auth config file.
-        :returns: Instance of DexdaRequest started using provided files.
-        """
+    ) -> "EdwinRequest":
+        """Start a new EdwinRequest using YAML auth config files."""
         _file_path = (
             auth_file_path if auth_file_path is not None else cls._FILE_DIR
         )
@@ -87,19 +83,19 @@ class DexdaRequest:
         return cls.new_from_param(_auth_yaml, "FILE")
 
     @classmethod
-    def new_from_env(
-        cls,
-    ) -> "DexdaRequest":
-        """Class method to start new DexdaRequest using .env file.
-        :raises ValueError: Missing one or more of the required values
-        in the .env file.
-        :returns: Instance of DexdaRequest started using .env file.
-        """
+    def new_from_env(cls) -> "EdwinRequest":
+        """Start a new EdwinRequest using environment variables."""
         dotenv.load_dotenv()
+        from elastic_poller.config import (
+            edwin_client_id,
+            edwin_client_token,
+            edwin_org,
+        )
+
         auth_dict: dict = {
-            "dexda_org": os.environ.get("DEXDA_ORG"),
-            "client_id": os.environ.get("CLIENT_ID"),
-            "client_secret": os.environ.get("CLIENT_SECRET"),
+            "edwin_org": edwin_org(),
+            "client_id": edwin_client_id(),
+            "client_secret": edwin_client_token(),
         }
         return cls.new_from_param(auth_dict, ".ENV")
 
@@ -108,45 +104,28 @@ class DexdaRequest:
         cls,
         auth_dict: dict[str, str],
         init_type: typing.Union[str, None] = None,
-    ) -> "DexdaRequest":
-        """Class method to start new DexdaRequest using params.
-        :param auth_dict: Dict containing Dexda Org and API key.
-        :param init_type: Init type.
-        :raises ValueError: Missing one or more of the required values
-        in auth_dict param.
-        :returns: Instance of DexdaRequest started using provided params.
-        """
-        auth_model: "_DexdaAuth" = _DexdaAuth.model_validate(obj=auth_dict)
+    ) -> "EdwinRequest":
+        """Start a new EdwinRequest from an auth dict (org, client id, secret)."""
+        auth_model: "_EdwinAuth" = _EdwinAuth.model_validate(
+            obj=_normalize_auth_dict(auth_dict)
+        )
         if init_type is None:
             init_type = "PARAM"
         return cls(auth_model, init_type)
 
-    def __init__(self, auth_data: "_DexdaAuth", init_type: str) -> None:
-        """
-        :param auth_data: Dict containing Dexda Org, Client ID and
-        Secret.
-        :param init_type: Init type.
-        """
+    def __init__(self, auth_data: "_EdwinAuth", init_type: str) -> None:
         _logger.debug("init type: %s", init_type)
         self._client_data = {
             "client_id": auth_data.client_id,
             "client_secret": auth_data.client_secret,
         }
-        self.portal_url = f"https://{auth_data.dexda_org}.dexda.ai"
+        self.portal_url = f"https://{auth_data.edwin_org}.dexda.ai"
         self._token_endpoint = f"{self.portal_url}/auth/token"
         self._data_endpoint = f"{self.portal_url}/integration/event/v1"
         self.access_token = self.retrieve_access_token()
 
-    def retrieve_access_token(
-        self,
-    ) -> "_DexdaAuthToken":
-        """Attempt to get access token from Dexda using client_id and
-        client_secret.
-        :raises RequestException: Error in HTTP request.
-        :returns: Access token received from Dexda.
-        """
-        #print(self.portal_url)
-        #print(self._client_data["client_id"] + "-" + self._client_data["client_secret"])
+    def retrieve_access_token(self) -> "_EdwinAuthToken":
+        """Exchange client credentials for an Edwin access token."""
         try:
             response = requests.post(
                 url=self._token_endpoint,
@@ -158,15 +137,13 @@ class DexdaRequest:
                 timeout=30,
             )
             response.raise_for_status()
-            # Only HTTP 200 is acceptable status code, anything else is raised
-            # as an error, if not already raised by raise_for_status()
             if response.status_code != 200:
                 raise requests.exceptions.RequestException
-            return typing.cast(_DexdaAuthToken, response.json())
+            return typing.cast(_EdwinAuthToken, response.json())
         except requests.exceptions.RequestException:
             _logger.error(
-                "Exception in _get_access_token()\n%s",
-               str(traceback.format_exc()),
+                "Exception in retrieve_access_token()\n%s",
+                str(traceback.format_exc()),
             )
             raise
 
@@ -182,31 +159,26 @@ class DexdaRequest:
     def writePayload(self, data: str):
         events = json.dumps(data, indent=4)
         timestamp = int(datetime.now().timestamp() * 1000)
-        with open(f'bad_payloads/{timestamp}.json', 'w') as fh:
+        with open(f"bad_payloads/{timestamp}.json", "w") as fh:
             fh.write(events)
         fh.close
 
     def send(
         self,
         access_token: str,
-        data: typing.List[typing.Dict[str, typing.Union[str, int, typing.Dict[str, str]]]]
+        data: List[Dict[str, Union[str, int, Dict[str, str]]]],
     ) -> bool:
-        """Send data to Dexda.
-        :param access_token: Access token received from Dexda.
-        :param data: List of CEF dicts to send to Dexda.
-        :raises ValueError: Error processing payload data.
-        :raises RequestException: Error in HTTP request.
-        :returns: Boolean indicating successful request.
-        """
-
+        """Send CEF event batches to Edwin."""
         batchcount = 100
         totalCount = 0
         all_succeeded = True
         for batch in self.batched(data, batchcount):
             totalCount = totalCount + len(batch)
-            print('Batch (' + str(totalCount) + ')')
+            print("Batch (" + str(totalCount) + ")")
 
-            auth_header = {"Authorization": f"Bearer {access_token.get('access_token')}"}
+            auth_header = {
+                "Authorization": f"Bearer {access_token.get('access_token')}"
+            }
             headers = {**self._HEADERS, **auth_header}
 
             retry_max = 3
@@ -219,27 +191,32 @@ class DexdaRequest:
                         url=self._data_endpoint,
                         data=json.dumps(batch),
                         headers=headers,
-                        timeout=360
+                        timeout=360,
                     )
                     response.raise_for_status()
-                    logging.info("Response status code: %s\n"
-                        "Response body: %s",
-                        response.status_code, response.json())
+                    logging.info(
+                        "Response status code: %s\nResponse body: %s",
+                        response.status_code,
+                        response.json(),
+                    )
                     batch_succeeded = True
                     break
                 except requests.exceptions.RequestException:
                     if response is not None and response.status_code == 422:
-                        print("Error detected in payload data\n%s",
-                                    response.json())
+                        print(
+                            "Error detected in payload data\n%s",
+                            response.json(),
+                        )
                         raise ValueError(response.json()) from None
-                    # Unrecoverable client errors: persist payload and fail the send
                     if response is not None and 400 <= response.status_code < 500:
                         self.writePayload(batch)
                         all_succeeded = False
                         break
                     print("Payload: \n%s", batch)
-                    print("Exception in send()\n%s",
-                            str(traceback.format_exc()))
+                    print(
+                        "Exception in send()\n%s",
+                        str(traceback.format_exc()),
+                    )
                     time.sleep(retry_backoff * (attempt + 1))
 
             if not batch_succeeded:
