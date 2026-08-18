@@ -86,13 +86,40 @@ jobs:
         run: |
           python -m unittest discover -s tests -t . -p "test_integration_*.py" -v
 
+  check-live-creds:
+    name: Check live delivery credentials
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          EDWIN_ORG: ${{ secrets.EDWIN_ORG }}
+          EDWIN_ID: ${{ secrets.EDWIN_ID }}
+          EDWIN_TOKEN: ${{ secrets.EDWIN_TOKEN }}
+          DEXDA_ORG: ${{ secrets.DEXDA_ORG }}
+          DEXDA_ID: ${{ secrets.DEXDA_ID }}
+          DEXDA_TOKEN: ${{ secrets.DEXDA_TOKEN }}
+        run: |
+          has_edwin=false
+          has_dexda=false
+          if [ -n "$EDWIN_ORG" ] && [ -n "$EDWIN_ID" ] && [ -n "$EDWIN_TOKEN" ]; then
+            has_edwin=true
+          fi
+          if [ -n "$DEXDA_ORG" ] && [ -n "$DEXDA_ID" ] && [ -n "$DEXDA_TOKEN" ]; then
+            has_dexda=true
+          fi
+          if [ "$has_edwin" = true ] || [ "$has_dexda" = true ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
   live-delivery:
     name: Live delivery (Edwin)
+    needs: check-live-creds
+    if: needs.check-live-creds.outputs.configured == 'true'
     runs-on: ubuntu-latest
-    if: >-
-      ${{ (secrets.EDWIN_ORG != '' || secrets.DEXDA_ORG != '') &&
-          (secrets.EDWIN_ID != '' || secrets.DEXDA_ID != '') &&
-          (secrets.EDWIN_TOKEN != '' || secrets.DEXDA_TOKEN != '') }}
     services:
       elasticsearch:
         image: docker.elastic.co/elasticsearch/elasticsearch:8.19.20
@@ -145,8 +172,12 @@ jobs:
           exit 1
 
       - name: Enable LM Logs when bearer token is configured
-        if: ${{ secrets.LM_LOGS_BEARER_TOKEN != '' }}
-        run: echo "LM_LOGS_ENABLED=true" >> "$GITHUB_ENV"
+        env:
+          LM_LOGS_BEARER_TOKEN: ${{ secrets.LM_LOGS_BEARER_TOKEN }}
+        run: |
+          if [ -n "$LM_LOGS_BEARER_TOKEN" ]; then
+            echo "LM_LOGS_ENABLED=true" >> "$GITHUB_ENV"
+          fi
 
       - name: Run multi-poll integration tests
         run: python -m unittest tests.test_integration_multipoll -v
