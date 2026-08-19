@@ -29,6 +29,16 @@ def env_bool(name: str, default: bool = False) -> bool:
     return _env_bool(name, default=default)
 
 
+def verify_edwin_ssl() -> bool:
+    """Return Edwin/LM Logs TLS verification setting and suppress its local warning."""
+    verify = env_bool("EDWIN_VERIFY_SSL", default=True)
+    if not verify:
+        requests.packages.urllib3.disable_warnings(
+            requests.packages.urllib3.exceptions.InsecureRequestWarning
+        )
+    return verify
+
+
 def sanitize_elastic_url(url: Optional[str]) -> str:
     """Return host:port for an Elasticsearch URL, stripping credentials."""
     if not url:
@@ -125,6 +135,7 @@ class LmLogsHandler(logging.Handler):
                     },
                     json=[event],
                     timeout=self.timeout,
+                    verify=verify_edwin_ssl(),
                 )
                 if response.status_code == 207:
                     self._report_failure(

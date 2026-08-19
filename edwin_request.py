@@ -21,6 +21,21 @@ import yaml
 _logger = logging.getLogger("elastic_poller.edwin_request")
 
 
+def _verify_ssl() -> bool:
+    """Return whether Edwin HTTPS requests should verify certificates."""
+    verify = os.getenv("EDWIN_VERIFY_SSL", "true").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not verify:
+        requests.packages.urllib3.disable_warnings(
+            requests.packages.urllib3.exceptions.InsecureRequestWarning
+        )
+    return verify
+
+
 def _normalize_auth_dict(auth_dict: dict[str, str]) -> dict[str, str]:
     """Accept legacy ``dexda_org`` keys in auth payloads."""
     normalized = dict(auth_dict)
@@ -135,6 +150,7 @@ class EdwinRequest:
                     "Accept": "application/json",
                 },
                 timeout=30,
+                verify=_verify_ssl(),
             )
             response.raise_for_status()
             if response.status_code != 200:
@@ -204,6 +220,7 @@ class EdwinRequest:
                         data=json.dumps(batch),
                         headers=headers,
                         timeout=360,
+                        verify=_verify_ssl(),
                     )
                     response.raise_for_status()
                     _logger.info(
