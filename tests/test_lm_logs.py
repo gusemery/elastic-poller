@@ -159,6 +159,7 @@ class LmLogsHandlerTests(unittest.TestCase):
             exc_info=None,
         )
         self.handler.emit(record)  # must not raise
+        self._wait_for_delivery()
 
     @patch("lm_logs.requests.post", side_effect=ConnectionError("network down"))
     def test_does_not_raise_on_network_error(self, mock_post):
@@ -172,6 +173,7 @@ class LmLogsHandlerTests(unittest.TestCase):
             exc_info=None,
         )
         self.handler.emit(record)  # must not raise
+        self._wait_for_delivery()
 
 
 class ConfigureLoggingTests(unittest.TestCase):
