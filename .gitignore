@@ -1,5 +1,6 @@
 # Package files
 *.bookmark
+*.dedupe.sqlite
 *.json
 
 # Byte-compiled / optimized / DLL files
