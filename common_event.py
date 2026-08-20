@@ -79,8 +79,8 @@ class _JsonpathMappings(pydantic.BaseModel, extra="forbid", strict=True):
     event_description: typing.List[str]
     event_severity: typing.List[str]
     # event_id and event_time are optional as we can generate them if needed
-    event_id: typing.Optional[typing.List[str]]
-    event_time: typing.Optional[typing.List[str]]
+    event_id: typing.Optional[typing.List[str]] = None
+    event_time: typing.Optional[typing.List[str]] = None
     # event_domain is only used for domain/tenant environments
     event_domain: typing.Optional[typing.List[str]]
     # The following fields are optional, so do not need jsonpath mappings
