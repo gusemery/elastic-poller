@@ -249,6 +249,32 @@ Monitor for:
 
 For maintainers — local testing, CI, and implementation details — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Disposable Kibana integration stack
+
+Start Elasticsearch, Kibana, a real `.es-query` Kibana rule, and one test
+document with:
+
+```bash
+docker compose -f docker-compose.kibana-test.yml up
+```
+
+The stack exposes Elasticsearch at `http://localhost:9200` and Kibana at
+`http://localhost:5601`. The setup container creates the test rule and deletes
+it when the stack is stopped. Elasticsearch and Kibana data are disposable
+because no volumes are configured.
+
+Stop and tear down everything with:
+
+```bash
+docker compose -f docker-compose.kibana-test.yml down --volumes --remove-orphans
+```
+
+Point a local poller at the generated event log with
+`ELASTIC_INDEXS=.kibana-event-log-ds`, `ELASTIC_QUERY=*`, and
+`ELASTIC_URL=http://localhost:9200`. This stack does not configure Edwin
+delivery; use a test credential set only when delivery is intentionally
+required.
+
 ## License
 
 See repository license and SPDX headers in source files.
